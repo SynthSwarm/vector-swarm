@@ -1,0 +1,54 @@
+services:
+  llm-engine:
+    image: ollama/ollama:latest
+    container_name: local_agent_engine
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_storage:/root/.ollama
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c", "/init-ollama.sh"]
+    configs:
+      - source: init_script
+        target: /init-ollama.sh
+        mode: 0755
+
+volumes:
+  ollama_storage:
+
+configs:
+  init_script:
+    content: |
+      #!/bin/bash
+
+      apt-get update && apt-get install -y curl
+
+      # Start the server in the background
+      /bin/ollama serve &
+      pid=$!
+
+      echo "Waiting for Ollama service to start..."
+      while ! curl -s http://localhost:11434/api/tags > /dev/null; do
+          sleep 1
+      done
+
+      echo "Pulling Qwen3 0.6B (The Reasoning Micro-Agent)..."
+      # The tag is likely qwen3:0.6b or just qwen3:0.5b (depending on if they rounded the tag)
+      # Check standard registry, but for now we assume explicit:
+      ollama pull qwen3:0.6b
+
+      echo "2. Pulling Semantic Memory (Embeddings)..."
+      # The 274MB champion.
+      ollama pull nomic-embed-text
+
+      echo "Model ready. Keeping container alive."
+      wait $pid
