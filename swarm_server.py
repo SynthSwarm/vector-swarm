@@ -1,16 +1,18 @@
 import time
 import numpy as np
 import atexit
+import threading
 from datetime import datetime
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from multiprocessing import Process
+from multiprocessing import Process, Queue
 from sklearn.decomposition import PCA
 from openai import OpenAI
 
 # Import our custom modules
 from swarm_physics import SwarmPhysics
-from swarm_agent import VectorAgent  # We will add a wrapper function here later
+from swarm_agent import VectorAgent
+from logged_llm_client import LoggedLLMClient
 
 # --- Logging Helper ---
 def log(message, level="INFO"):
@@ -30,7 +32,15 @@ EMBED_MODEL = "nomic-embed-text"
 physics_engine = None
 agent_processes = []
 pca_model = PCA(n_components=3)
+pca_fitted = False  # Track if PCA has been fitted
+expected_agent_count = 0  # How many agents we're waiting for
 client = OpenAI(base_url=OLLAMA_API, api_key="ollama")
+
+# --- Chat Logging Infrastructure ---
+chat_log_queue = None  # Multiprocessing Queue for agent logs
+chat_logs = []  # In-memory buffer (last 50 entries)
+MAX_CHAT_LOGS = 50
+log_drain_thread = None  # Background thread to drain queue
 
 
 # --- Helper: Embedding Wrapper ---
@@ -48,11 +58,39 @@ def get_embedding(text):
 MAX_AGENTS = 20
 VECTOR_DIM = 768
 
+
+# --- Background Thread: Drain Log Queue ---
+def drain_log_queue():
+    """
+    Background thread that continuously drains the chat_log_queue
+    and appends entries to the in-memory chat_logs buffer.
+    Keeps only the last MAX_CHAT_LOGS entries.
+    """
+    global chat_logs
+    while True:
+        try:
+            # Block until we get a log entry (or timeout after 1 second)
+            entry = chat_log_queue.get(timeout=1.0)
+            chat_logs.append(entry)
+
+            # Trim to last N entries
+            if len(chat_logs) > MAX_CHAT_LOGS:
+                chat_logs = chat_logs[-MAX_CHAT_LOGS:]
+
+        except Exception:
+            # Queue.Empty exception or other errors - just continue
+            time.sleep(0.1)
+
+
 # --- The Agent Wrapper (Must be top-level for pickling) ---
-def run_agent_process(agent_id):
+def run_agent_process(agent_id, log_queue):
     """
     The entry point for a child process.
     Re-instantiates the Physics engine (create=False) to attach to shared memory.
+
+    Args:
+        agent_id: ID of this agent
+        log_queue: multiprocessing.Queue for chat logs
     """
     log(f"Agent {agent_id} starting up", "AGENT")
 
@@ -61,15 +99,17 @@ def run_agent_process(agent_id):
     # IMPORTANT: Must use same parameters as the parent process!
     physics = SwarmPhysics(max_agents=MAX_AGENTS, dim=VECTOR_DIM, create=False)
 
-    # 2. Setup Local LLM Client (Each process needs its own connection)
-    local_client = OpenAI(base_url=OLLAMA_API, api_key="ollama")
+    # 2. Setup Local LLM Client with Logging Wrapper
+    base_client = OpenAI(base_url=OLLAMA_API, api_key="ollama")
+    logged_client = LoggedLLMClient(base_client, agent_id, log_queue)
 
     # 3. Create Agent Instance
     agent = VectorAgent(
         agent_id=agent_id,
         physics_engine=physics,
-        llm_client=local_client,
+        llm_client=logged_client,
         embed_func=get_embedding,  # Pass our helper function
+        log_queue=log_queue,  # Pass queue for selection logging
     )
 
     # 4. The Infinite Loop
@@ -85,10 +125,19 @@ def run_agent_process(agent_id):
 
 # --- Server Initialization ---
 def init_system():
-    global physics_engine
+    global physics_engine, chat_log_queue, log_drain_thread
     # Initialize the Physics Engine (Allocates Shared RAM)
     physics_engine = SwarmPhysics(max_agents=MAX_AGENTS, dim=VECTOR_DIM, create=True)
     log("🐝 Swarm Physics Engine initialized", "SYSTEM")
+
+    # Initialize Chat Log Queue
+    chat_log_queue = Queue(maxsize=200)  # Buffer up to 200 messages
+    log("📝 Chat log queue initialized", "SYSTEM")
+
+    # Start background thread to drain log queue
+    log_drain_thread = threading.Thread(target=drain_log_queue, daemon=True)
+    log_drain_thread.start()
+    log("🔄 Log drain thread started", "SYSTEM")
 
 
 # --- API Endpoints ---
@@ -99,10 +148,13 @@ def start_swarm():
     """
     Payload: { "mission": "Fix the DB deadlock", "agent_count": 3 }
     """
-    global agent_processes
+    global agent_processes, expected_agent_count
     data = request.json
     mission = data.get("mission", "Idling")
     count = int(data.get("agent_count", 3))
+
+    # Store expected count for PCA fitting logic
+    expected_agent_count = count
 
     log(f"⚡ START command received: '{mission}' with {count} agents", "API")
 
@@ -119,7 +171,7 @@ def start_swarm():
     # 3. Spawn Agents
     log(f"Spawning {count} agent processes...", "API")
     for i in range(count):
-        p = Process(target=run_agent_process, args=(i,))
+        p = Process(target=run_agent_process, args=(i, chat_log_queue))
         p.start()
         agent_processes.append(p)
     log(f"✓ All {count} agents spawned", "API")
@@ -134,7 +186,7 @@ def stop_swarm_route():
 
 
 def stop_swarm():
-    global agent_processes
+    global agent_processes, pca_fitted, expected_agent_count, chat_logs
     if not agent_processes:
         log("No active agents to stop", "API")
         return
@@ -146,7 +198,15 @@ def stop_swarm():
             p.join()
             log(f"✓ Agent {i} terminated", "API")
     agent_processes = []
-    log("All agents stopped", "API")
+
+    # Reset PCA and agent count for next run
+    pca_fitted = False
+    expected_agent_count = 0
+
+    # Clear chat logs for next run
+    chat_logs = []
+
+    log("All agents stopped, PCA and chat logs reset for next mission", "API")
 
 
 @app.route("/api/swarm/state", methods=["GET"])
@@ -154,6 +214,7 @@ def get_state():
     """
     Returns 3D coordinates for visualization.
     """
+    global pca_fitted
     assert physics_engine is not None, "Physics engine not initialized"
 
     # 1. Read Raw Vectors from Shared Memory
@@ -164,12 +225,26 @@ def get_state():
     if count < 3:
         return jsonify({"status": "waiting_for_entropy", "data": []})
 
+    # Check if all agents have reported in (count = Queen + all agents)
+    expected_total = expected_agent_count + 1  # +1 for Queen
+    if not pca_fitted and count < expected_total:
+        log(f"Waiting for all agents to report... ({count}/{expected_total})", "VIZ")
+        return jsonify({"status": "waiting_for_agents", "data": [], "count": count, "expected": expected_total})
+
     raw_vectors = physics_engine.space.vector_view[:count]
 
-    # 2. Dimensionality Reduction (Dynamic PCA)
+    # 2. Dimensionality Reduction (Fixed PCA - fit once, reuse)
     # We wrap in try/except because PCA can fail if vectors are identical (zero variance)
     try:
-        reduced = pca_model.fit_transform(raw_vectors)
+        if not pca_fitted:
+            # First time: fit the PCA and transform (after all agents have reported)
+            log(f"All {expected_agent_count} agents ready! Fitting PCA model (locking camera angle)...", "VIZ")
+            reduced = pca_model.fit_transform(raw_vectors)
+            pca_fitted = True
+            log("✓ PCA locked - Queen position fixed", "VIZ")
+        else:
+            # Subsequent times: just transform using the fitted model
+            reduced = pca_model.transform(raw_vectors)
     except Exception as e:
         # Fallback if system is perfectly static/aligned
         return jsonify({"status": "calculating", "error": str(e)})
@@ -178,18 +253,13 @@ def get_state():
 
     # 3. Format Data
     # Index 0 is QUEEN
-    queen_x, queen_y, queen_z = float(reduced[0][0]), float(reduced[0][1]), float(reduced[0][2])
-
-    # Log Queen position for debugging
-    log(f"Queen position: ({queen_x:.3f}, {queen_y:.3f}, {queen_z:.3f})", "VIZ")
-
     snapshot.append(
         {
             "id": "QUEEN",
             "type": "queen",
-            "x": queen_x,
-            "y": queen_y,
-            "z": queen_z,
+            "x": float(reduced[0][0]),
+            "y": float(reduced[0][1]),
+            "z": float(reduced[0][2]),
             "label": "MISSION COMMAND",
         }
     )
@@ -207,7 +277,12 @@ def get_state():
             }
         )
 
-    return jsonify({"status": "active", "count": count, "data": snapshot})
+    return jsonify({
+        "status": "active",
+        "count": count,
+        "data": snapshot,
+        "chat_logs": chat_logs  # Include chat logs from all agents
+    })
 
 
 # --- Cleanup Handlers ---

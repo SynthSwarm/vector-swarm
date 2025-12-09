@@ -4,19 +4,24 @@
 <head>
   <meta charset="UTF-8">
   <title>VECTOR SWARM // CONTROL</title>
+  <link rel="stylesheet" href="styles.css">
   <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
   <style>
     :root {
-      --bg-color: #0d0d0d;
-      --panel-bg: #1a1a1a;
-      --text-main: #00ff41;
-      /* Hacker Green */
-      --text-dim: #008f11;
-      --accent: #00d9ff;
-      /* Cyan */
+      --bg-color: #000;
+      --panel-bg: rgba(0, 0, 0, 0.85);
+      --text-main: #00aaff;
+      /* Primary Blue */
+      --text-secondary: #00ff88;
+      /* Secondary Green */
+      --text-dim: #aaa;
+      --accent: #00aaff;
+      /* Cyan Blue */
+      --accent-orange: #ff6600;
       --danger: #ff0055;
       --queen: #ffd700;
       /* Gold */
+      --border-color: #00aaff;
     }
 
     body {
@@ -34,18 +39,21 @@
     /* --- Header / HUD --- */
     #hud {
       padding: 10px 20px;
-      border-bottom: 1px solid var(--text-dim);
+      border-bottom: 2px solid var(--border-color);
       display: flex;
       justify-content: space-between;
       align-items: center;
       background: var(--panel-bg);
+      backdrop-filter: blur(10px);
       z-index: 10;
     }
 
     h1 {
       margin: 0;
       font-size: 1.2rem;
-      letter-spacing: 2px;
+      letter-spacing: 3px;
+      color: var(--text-main);
+      text-shadow: 0 0 10px var(--text-main);
     }
 
     .status-dot {
@@ -58,12 +66,13 @@
     }
 
     .status-dot.active {
-      background: var(--text-main);
-      box-shadow: 0 0 8px var(--text-main);
+      background: var(--text-secondary);
+      box-shadow: 0 0 8px var(--text-secondary);
     }
 
     .status-dot.error {
       background: var(--danger);
+      box-shadow: 0 0 8px var(--danger);
     }
 
     /* --- Controls Container --- */
@@ -71,61 +80,83 @@
       position: absolute;
       top: 60px;
       left: 20px;
-      width: 300px;
-      background: rgba(26, 26, 26, 0.9);
-      border: 1px solid var(--text-dim);
-      padding: 15px;
+      width: 320px;
+      background: var(--panel-bg);
+      border: 2px solid var(--border-color);
+      border-radius: 8px;
+      padding: 20px;
       z-index: 20;
-      box-shadow: 0 0 15px rgba(0, 0, 0, 0.5);
+      backdrop-filter: blur(10px);
+      box-shadow: 0 0 20px rgba(0, 170, 255, 0.3);
     }
 
     label {
       display: block;
       margin-bottom: 5px;
       font-size: 0.8rem;
-      color: #888;
+      color: var(--text-dim);
+      letter-spacing: 1px;
     }
 
     input[type="text"],
     input[type="number"] {
-      width: 90%;
-      background: #000;
-      border: 1px solid #444;
-      color: var(--text-main);
+      width: calc(100% - 16px);
+      background: rgba(0, 0, 0, 0.7);
+      border: 1px solid #333;
+      color: var(--text-secondary);
       padding: 8px;
       font-family: inherit;
       margin-bottom: 15px;
+      border-radius: 4px;
+      transition: border 0.2s;
+    }
+
+    input[type="text"]:focus,
+    input[type="number"]:focus {
+      outline: none;
+      border-color: var(--border-color);
+      box-shadow: 0 0 8px rgba(0, 170, 255, 0.3);
     }
 
     button {
       width: 100%;
-      padding: 10px;
+      padding: 12px;
       border: none;
       cursor: pointer;
       font-family: inherit;
       font-weight: bold;
       margin-bottom: 10px;
       text-transform: uppercase;
+      letter-spacing: 2px;
+      border-radius: 4px;
+      transition: all 0.2s;
     }
 
     #btn-start {
-      background: var(--text-dim);
+      background: var(--text-main);
       color: #000;
     }
 
     #btn-start:hover {
-      background: var(--text-main);
+      background: #00ffff;
+      box-shadow: 0 0 15px var(--text-main);
+      transform: translateY(-2px);
     }
 
     #btn-stop {
       background: #333;
       color: var(--danger);
-      border: 1px solid var(--danger);
+      border: 2px solid var(--danger);
     }
 
     #btn-stop:hover {
       background: var(--danger);
       color: #fff;
+      transform: translateY(-2px);
+    }
+
+    button:active {
+      transform: translateY(0);
     }
 
     /* --- Visualization Area --- */
@@ -141,14 +172,227 @@
       right: 20px;
       width: 400px;
       height: 150px;
-      background: rgba(0, 0, 0, 0.8);
-      border: 1px solid #333;
+      background: rgba(0, 0, 0, 0.85);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
       font-size: 0.75rem;
       overflow-y: auto;
-      padding: 10px;
-      color: #ccc;
+      padding: 12px;
+      color: var(--text-dim);
       pointer-events: none;
-      /* Let clicks pass through to graph */
+      backdrop-filter: blur(10px);
+      box-shadow: 0 0 15px rgba(0, 170, 255, 0.2);
+    }
+
+    /* --- Agent Chat Logs Overlay --- */
+    #agent-chats {
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      width: 500px;
+      height: 50vh;
+      /* Half viewport height */
+      background: rgba(0, 0, 0, 0.85);
+      border: 2px solid var(--border-color);
+      border-radius: 8px;
+      font-size: 0.7rem;
+      overflow-y: auto;
+      padding: 15px;
+      color: var(--text-dim);
+      pointer-events: auto;
+      backdrop-filter: blur(10px);
+      box-shadow: 0 0 20px rgba(0, 170, 255, 0.3);
+    }
+
+    #agent-chats .chat-header {
+      color: var(--text-main);
+      font-weight: bold;
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 2px solid var(--border-color);
+      font-size: 0.85rem;
+      letter-spacing: 2px;
+      text-shadow: 0 0 8px var(--text-main);
+    }
+
+    #agent-chats .chat-entry {
+      margin-bottom: 12px;
+      padding: 10px;
+      background: rgba(0, 170, 255, 0.05);
+      border-left: 3px solid;
+      border-radius: 4px;
+      transition: background 0.2s;
+    }
+
+    #agent-chats .chat-entry:hover {
+      background: rgba(0, 170, 255, 0.1);
+    }
+
+    #agent-chats .chat-timestamp {
+      color: #666;
+      font-size: 0.65rem;
+      margin-right: 8px;
+    }
+
+    #agent-chats .chat-agent {
+      font-weight: bold;
+      margin-right: 8px;
+    }
+
+    #agent-chats .chat-action {
+      color: #ddd;
+      font-style: italic;
+      margin-top: 4px;
+    }
+
+    #agent-chats .chat-score {
+      color: var(--text-secondary);
+      font-size: 0.7rem;
+      margin-left: 8px;
+      font-weight: bold;
+    }
+
+    #agent-chats .chat-candidates {
+      margin-top: 6px;
+      padding-left: 10px;
+      font-size: 0.65rem;
+      color: #888;
+      border-left: 1px solid #333;
+    }
+
+    /* Agent color coding */
+    .agent-0 {
+      border-left-color: #00d9ff !important;
+      /* Cyan */
+    }
+
+    .agent-1 {
+      border-left-color: #00ff85 !important;
+      /* Green */
+    }
+
+    .agent-2 {
+      border-left-color: #ff00ff !important;
+      /* Magenta */
+    }
+
+    .agent-3 {
+      border-left-color: #ffaa00 !important;
+      /* Orange */
+    }
+
+    .agent-4 {
+      border-left-color: #ff0055 !important;
+      /* Red-Pink */
+    }
+
+    .agent-5 {
+      border-left-color: #55ff00 !important;
+      /* Lime */
+    }
+
+    .agent-6 {
+      border-left-color: #aa00ff !important;
+      /* Purple */
+    }
+
+    .agent-7 {
+      border-left-color: #00ffff !important;
+      /* Aqua */
+    }
+
+    .agent-8 {
+      border-left-color: #ffff00 !important;
+      /* Yellow */
+    }
+
+    .agent-9 {
+      border-left-color: #ff5500 !important;
+      /* Orange-Red */
+    }
+
+    /* Colors for agent text */
+    .agent-0 .chat-agent {
+      color: #00d9ff;
+    }
+
+    .agent-1 .chat-agent {
+      color: #00ff85;
+    }
+
+    .agent-2 .chat-agent {
+      color: #ff00ff;
+    }
+
+    .agent-3 .chat-agent {
+      color: #ffaa00;
+    }
+
+    .agent-4 .chat-agent {
+      color: #ff0055;
+    }
+
+    .agent-5 .chat-agent {
+      color: #55ff00;
+    }
+
+    .agent-6 .chat-agent {
+      color: #aa00ff;
+    }
+
+    .agent-7 .chat-agent {
+      color: #00ffff;
+    }
+
+    .agent-8 .chat-agent {
+      color: #ffff00;
+    }
+
+    .agent-9 .chat-agent {
+      color: #ff5500;
+    }
+
+    /* --- Scrollbar Styling --- */
+    #agent-chats::-webkit-scrollbar,
+    #logs::-webkit-scrollbar {
+      width: 8px;
+    }
+
+    #agent-chats::-webkit-scrollbar-track,
+    #logs::-webkit-scrollbar-track {
+      background: rgba(0, 0, 0, 0.5);
+      border-radius: 4px;
+    }
+
+    #agent-chats::-webkit-scrollbar-thumb,
+    #logs::-webkit-scrollbar-thumb {
+      background: var(--border-color);
+      border-radius: 4px;
+    }
+
+    #agent-chats::-webkit-scrollbar-thumb:hover,
+    #logs::-webkit-scrollbar-thumb:hover {
+      background: #00ffff;
+    }
+
+    /* --- Animations --- */
+    @keyframes glow {
+      0%,
+      100% {
+        text-shadow: 0 0 5px var(--text-main);
+      }
+
+      50% {
+        text-shadow: 0 0 20px var(--text-main), 0 0 30px var(--text-main);
+      }
+    }
+
+    h1 {
+      animation: glow 3s infinite;
+    }
+
+    #agent-chats .chat-header {
+      animation: glow 4s infinite;
     }
   </style>
 </head>
@@ -176,6 +420,13 @@
   </div>
 
   <div id="viz-container"></div>
+
+  <div id="agent-chats">
+    <div class="chat-header">AGENT INTELLIGENCE // DECISION STREAM</div>
+    <div id="chat-content">
+      <div style="color: #666; font-style: italic;">&gt; Waiting for swarm initialization...</div>
+    </div>
+  </div>
 
   <div id="logs" id="log-window">
     <div>> System Ready. Waiting for input...</div>
@@ -214,9 +465,30 @@
       showlegend: true,
       margin: { l: 0, r: 0, t: 0, b: 0 },
       scene: {
-        xaxis: { title: '', showgrid: true, gridcolor: '#222', zerolinecolor: '#444', showticklabels: false },
-        yaxis: { title: '', showgrid: true, gridcolor: '#222', zerolinecolor: '#444', showticklabels: false },
-        zaxis: { title: '', showgrid: true, gridcolor: '#222', zerolinecolor: '#444', showticklabels: false },
+        xaxis: {
+          title: '',
+          range: [-1, 1],
+          showgrid: true,
+          gridcolor: '#222',
+          zerolinecolor: '#444',
+          showticklabels: false
+        },
+        yaxis: {
+          title: '',
+          range: [-1, 1],
+          showgrid: true,
+          gridcolor: '#222',
+          zerolinecolor: '#444',
+          showticklabels: false
+        },
+        zaxis: {
+          title: '',
+          range: [-1, 1],
+          showgrid: true,
+          gridcolor: '#222',
+          zerolinecolor: '#444',
+          showticklabels: false
+        },
         bgcolor: '#0d0d0d',
         camera: {
           eye: { x: 1.5, y: 1.5, z: 1.5 } // Initial camera angle
@@ -237,6 +509,11 @@
       log(`Initializing Swarm with ${count} agents...`);
       setStatus("BOOTING...", "active");
 
+      // Clear trail and camera lock for new mission
+      historicalPositions = [];
+      cameraLocked = false;
+      log("Trail cleared - starting new mission");
+
       try {
         const res = await fetch(`${API_URL}/start`, {
           method: 'POST',
@@ -251,7 +528,7 @@
         // Start Polling Loop
         if (!isPolling) {
           isPolling = true;
-          pollInterval = setInterval(updateViz, 1000); // 1 tick per second
+          pollInterval = setInterval(updateViz, 2000); // 1 tick every 2 seconds
         }
 
       } catch (e) {
@@ -268,11 +545,6 @@
         setStatus("SYSTEM OFFLINE");
         clearInterval(pollInterval);
         isPolling = false;
-
-        // Reset trail and camera lock for next run
-        historicalPositions = [];
-        cameraLocked = false;
-        log("Trail cleared - ready for next mission");
       } catch (e) {
         log(`Error stopping: ${e.message}`);
       }
@@ -288,9 +560,15 @@
           return;
         }
 
+        if (json.status === "waiting_for_agents") {
+          log(`Waiting for agents to initialize... (${json.count}/${json.expected})`);
+          return;
+        }
+
         if (json.status !== "active") return;
 
         renderFrame(json.data);
+        renderChatLogs(json.chat_logs || []);
 
       } catch (e) {
         console.error(e);
@@ -313,7 +591,7 @@
 
       const traces = [];
 
-      // 1. Historical Trail (Dimmed - only agents, not queen)
+      // 1. Historical Trail (Grey - only agents, not queen)
       if (historicalPositions.length > 0) {
         traces.push({
           x: historicalPositions.map(p => p.x),
@@ -322,7 +600,7 @@
           mode: 'markers',
           type: 'scatter3d',
           name: 'Trail (History)',
-          marker: { size: 4, color: '#00d9ff', opacity: 0.2 },
+          marker: { size: 3, color: '#666666', opacity: 0.3 },
           hoverinfo: 'skip',
           showlegend: false
         });
@@ -354,28 +632,91 @@
         });
       }
 
-      // Get current camera position before update (if locked)
-      const currentLayout = cameraLocked ?
-        document.getElementById('viz-container')._fullLayout.scene.camera :
-        layout.scene.camera;
+      // Always preserve user's current camera position/zoom
+      const container = document.getElementById('viz-container');
+      let currentCamera = layout.scene.camera; // Default camera
 
-      // Lock camera after first render
+      // If plot exists, get the current camera state (includes user's manual adjustments)
+      if (container._fullLayout && container._fullLayout.scene && container._fullLayout.scene.camera) {
+        currentCamera = container._fullLayout.scene.camera;
+      }
+
+      // Lock camera after first render (for trail effect)
       if (!cameraLocked && drones.length > 0) {
         cameraLocked = true;
         log("Camera locked - swarm trail visualization active");
       }
 
-      // Update layout to preserve camera
-      const updatedLayout = { ...layout };
-      if (cameraLocked) {
-        updatedLayout.scene = {
+      // Update layout to preserve camera (always, not just when locked)
+      const updatedLayout = {
+        ...layout,
+        scene: {
           ...layout.scene,
-          camera: currentLayout
-        };
+          camera: currentCamera
+        }
+      };
+
+      // Use Plotly.react for efficient updates (preserves user interactions)
+      Plotly.react('viz-container', traces, updatedLayout);
+    }
+
+    // --- Chat Log Rendering ---
+    function renderChatLogs(logs) {
+      const container = document.getElementById('chat-content');
+
+      if (logs.length === 0) {
+        container.innerHTML = '<div style="color: #666; font-style: italic;">&gt; No agent decisions yet...</div>';
+        return;
       }
 
-      // Use Plotly.react for efficient updates
-      Plotly.react('viz-container', traces, updatedLayout);
+      // Build HTML for all log entries
+      let html = '';
+
+      // Render logs in reverse order (newest first)
+      for (let i = logs.length - 1; i >= 0; i--) {
+        const entry = logs[i];
+
+        // Determine entry type and format accordingly
+        if (entry.type === 'selection') {
+          // Agent selection log
+          html += `
+            <div class="chat-entry agent-${entry.agent_id}">
+              <div>
+                <span class="chat-timestamp">[${entry.timestamp}]</span>
+                <span class="chat-agent">Agent-${entry.agent_id}</span>
+                <span class="chat-score">⚡${entry.alignment_score.toFixed(3)}</span>
+              </div>
+              <div class="chat-action">"${entry.selected_action}"</div>
+              ${entry.candidates && entry.candidates.length > 0 ? `
+                <div class="chat-candidates">
+                  Evaluated: ${entry.candidates.slice(0, 3).join(' | ')}
+                </div>
+              ` : ''}
+            </div>
+          `;
+        } else {
+          // Raw LLM interaction log
+          html += `
+            <div class="chat-entry agent-${entry.agent_id}" style="opacity: 0.6;">
+              <div>
+                <span class="chat-timestamp">[${entry.timestamp}]</span>
+                <span class="chat-agent">Agent-${entry.agent_id}</span>
+                <span style="color: #888; font-size: 0.6rem;">${entry.model}</span>
+              </div>
+              <div style="font-size: 0.65rem; color: #999; margin-top: 3px;">
+                <div>Prompt: ${entry.prompt.substring(0, 100)}...</div>
+                <div>Response: ${entry.response.substring(0, 100)}...</div>
+              </div>
+            </div>
+          `;
+        }
+      }
+
+      container.innerHTML = html;
+
+      // Auto-scroll to bottom (newest entry)
+      const chatContainer = document.getElementById('agent-chats');
+      chatContainer.scrollTop = chatContainer.scrollHeight;
     }
 
   </script>

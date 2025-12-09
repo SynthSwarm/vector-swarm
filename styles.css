@@ -1,0 +1,380 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Courier New', monospace;
+    background-color: #000;
+    color: #fff;
+    overflow: hidden;
+}
+
+#canvas-container {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 0;
+}
+
+#canvas-container canvas {
+    cursor: default;
+}
+
+#canvas-container canvas:active {
+    cursor: grabbing;
+}
+
+/* ============================================================================
+   STATISTICS OVERLAY (Top-Left)
+   ============================================================================ */
+
+#stats-overlay {
+    position: fixed;
+    top: 20px;
+    left: 20px;
+    background: rgba(0, 0, 0, 0.7);
+    border: 1px solid #00aaff;
+    border-radius: 8px;
+    padding: 15px 20px;
+    z-index: 100;
+    min-width: 250px;
+    backdrop-filter: blur(10px);
+}
+
+#stats-overlay h3 {
+    font-size: 14px;
+    letter-spacing: 2px;
+    color: #00aaff;
+    margin-bottom: 10px;
+    text-align: center;
+    border-bottom: 1px solid #00aaff;
+    padding-bottom: 8px;
+}
+
+#stats-overlay table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+#stats-overlay td {
+    padding: 5px 10px;
+    font-size: 13px;
+}
+
+#stats-overlay td:first-child {
+    color: #aaa;
+    text-align: left;
+}
+
+#stats-overlay td:last-child {
+    color: #00ff88;
+    text-align: right;
+    font-weight: bold;
+}
+
+/* ============================================================================
+   CONTROL PANEL (Right Sidebar)
+   ============================================================================ */
+
+#controls-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    width: 320px;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.85);
+    border-left: 2px solid #00aaff;
+    padding: 30px 20px;
+    z-index: 100;
+    overflow-y: auto;
+    backdrop-filter: blur(10px);
+}
+
+#controls-panel h2 {
+    font-size: 18px;
+    letter-spacing: 3px;
+    color: #00aaff;
+    text-align: center;
+    margin-bottom: 30px;
+    padding-bottom: 10px;
+    border-bottom: 2px solid #00aaff;
+}
+
+.control-group {
+    margin-bottom: 30px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid #333;
+}
+
+.control-group:last-child {
+    border-bottom: none;
+}
+
+.control-group h3 {
+    font-size: 14px;
+    letter-spacing: 2px;
+    color: #ff6600;
+    margin-bottom: 15px;
+}
+
+/* Slider Controls */
+.slider-control {
+    margin-bottom: 15px;
+}
+
+.slider-control label {
+    display: block;
+    font-size: 12px;
+    color: #aaa;
+    margin-bottom: 5px;
+}
+
+.slider-control input[type="range"] {
+    width: 100%;
+    height: 4px;
+    background: #333;
+    border-radius: 2px;
+    outline: none;
+    -webkit-appearance: none;
+}
+
+.slider-control input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    background: #00aaff;
+    border-radius: 50%;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.slider-control input[type="range"]::-webkit-slider-thumb:hover {
+    background: #00ffff;
+    box-shadow: 0 0 10px #00aaff;
+}
+
+.slider-control input[type="range"]::-moz-range-thumb {
+    width: 16px;
+    height: 16px;
+    background: #00aaff;
+    border: none;
+    border-radius: 50%;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.slider-control input[type="range"]::-moz-range-thumb:hover {
+    background: #00ffff;
+    box-shadow: 0 0 10px #00aaff;
+}
+
+.value-display {
+    display: inline-block;
+    float: right;
+    font-size: 12px;
+    color: #00ff88;
+    font-weight: bold;
+}
+
+/* Agent Control Buttons */
+.agent-buttons {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 15px;
+}
+
+/* Toggle Control */
+.toggle-control {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.toggle-label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+}
+
+.toggle-label input[type="checkbox"] {
+    width: 40px;
+    height: 20px;
+    appearance: none;
+    background: #333;
+    border-radius: 10px;
+    position: relative;
+    cursor: pointer;
+    transition: background 0.3s;
+}
+
+.toggle-label input[type="checkbox"]:checked {
+    background: #00aaff;
+}
+
+.toggle-label input[type="checkbox"]::before {
+    content: '';
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #fff;
+    top: 2px;
+    left: 2px;
+    transition: left 0.3s;
+}
+
+.toggle-label input[type="checkbox"]:checked::before {
+    left: 22px;
+}
+
+.toggle-text {
+    font-size: 13px;
+    color: #aaa;
+}
+
+.count-display {
+    font-size: 24px;
+    color: #00ff88;
+    font-weight: bold;
+    min-width: 50px;
+    text-align: center;
+}
+
+.control-btn {
+    background: #00aaff;
+    border: none;
+    color: #000;
+    font-family: 'Courier New', monospace;
+    font-size: 18px;
+    font-weight: bold;
+    padding: 10px 20px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.control-btn:hover {
+    background: #00ffff;
+    box-shadow: 0 0 15px #00aaff;
+    transform: translateY(-2px);
+}
+
+.control-btn:active {
+    transform: translateY(0);
+}
+
+/* Speed Control Buttons */
+.speed-buttons {
+    display: flex;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.speed-buttons .control-btn {
+    flex: 1;
+    font-size: 14px;
+    padding: 8px 10px;
+}
+
+/* Instructions */
+.instructions ul {
+    list-style: none;
+    padding: 0;
+}
+
+.instructions li {
+    font-size: 12px;
+    color: #aaa;
+    padding: 5px 0;
+    padding-left: 20px;
+    position: relative;
+}
+
+.instructions li::before {
+    content: '▹';
+    position: absolute;
+    left: 0;
+    color: #00aaff;
+    font-size: 14px;
+}
+
+/* ============================================================================
+   SCROLLBAR STYLING
+   ============================================================================ */
+
+#controls-panel::-webkit-scrollbar {
+    width: 8px;
+}
+
+#controls-panel::-webkit-scrollbar-track {
+    background: #000;
+}
+
+#controls-panel::-webkit-scrollbar-thumb {
+    background: #00aaff;
+    border-radius: 4px;
+}
+
+#controls-panel::-webkit-scrollbar-thumb:hover {
+    background: #00ffff;
+}
+
+/* ============================================================================
+   RESPONSIVE DESIGN
+   ============================================================================ */
+
+@media (max-width: 768px) {
+    #controls-panel {
+        width: 100%;
+        height: auto;
+        max-height: 50%;
+        top: auto;
+        bottom: 0;
+        border-left: none;
+        border-top: 2px solid #00aaff;
+    }
+
+    #stats-overlay {
+        top: 10px;
+        left: 10px;
+        right: 10px;
+        min-width: auto;
+    }
+}
+
+/* ============================================================================
+   ANIMATIONS
+   ============================================================================ */
+
+@keyframes pulse {
+    0%, 100% {
+        opacity: 0.8;
+    }
+    50% {
+        opacity: 1;
+    }
+}
+
+#stats-overlay td:last-child {
+    animation: pulse 2s infinite;
+}
+
+@keyframes glow {
+    0%, 100% {
+        text-shadow: 0 0 5px #00aaff;
+    }
+    50% {
+        text-shadow: 0 0 20px #00aaff, 0 0 30px #00aaff;
+    }
+}
+
+#controls-panel h2 {
+    animation: glow 3s infinite;
+}

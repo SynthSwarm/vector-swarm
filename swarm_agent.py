@@ -10,12 +10,13 @@ def log(message, agent_id):
 
 
 class VectorAgent:
-    def __init__(self, agent_id, physics_engine: SwarmPhysics, llm_client, embed_func):
+    def __init__(self, agent_id, physics_engine: SwarmPhysics, llm_client, embed_func, log_queue=None):
         self.id = agent_id
         self.physics = physics_engine
         self.llm = llm_client
         self.embed = embed_func
         self.current_task = "Idle"
+        self.log_queue = log_queue  # For detailed selection logging
 
         # Weights (Personality)
         self.w_c = 1.0  # Obedience to Queen
@@ -41,9 +42,17 @@ class VectorAgent:
         Generate 3 distinct, short next potential actions.
         Format: 1. [Action]
         """
-        response = self.llm.chat.completions.create(
-            model="qwen3:0.6b", messages=[{"role": "user", "content": prompt}]
-        )
+        # Check if we're using LoggedLLMClient or raw OpenAI client
+        if hasattr(self.llm, 'chat_completion'):
+            # Using LoggedLLMClient wrapper
+            response = self.llm.chat_completion(
+                model="qwen3:0.6b", messages=[{"role": "user", "content": prompt}]
+            )
+        else:
+            # Using raw OpenAI client (fallback for compatibility)
+            response = self.llm.chat.completions.create(
+                model="qwen3:0.6b", messages=[{"role": "user", "content": prompt}]
+            )
         options_text = response.choices[0].message.content.split("\n")
         # (Add simple parsing logic here to extract the 3 strings)
         candidates = [opt.strip() for opt in options_text if opt.strip()]
@@ -71,3 +80,19 @@ class VectorAgent:
         # 5. Act (Move)
         log(f"✓ Selected: '{best_action}' (score={best_score:.3f})", self.id)
         self.current_task = best_action
+
+        # 6. Log Selection Details (if queue available)
+        if self.log_queue:
+            timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            selection_log = {
+                "timestamp": timestamp,
+                "agent_id": self.id,
+                "selected_action": best_action,
+                "alignment_score": float(best_score),
+                "candidates": candidates[:5],  # Log first 5 candidates to avoid huge entries
+                "type": "selection"  # Mark this as a selection log (vs. raw LLM log)
+            }
+            try:
+                self.log_queue.put_nowait(selection_log)
+            except Exception:
+                pass  # Queue full, skip logging
