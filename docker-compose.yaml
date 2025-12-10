@@ -1,11 +1,15 @@
 services:
   llm-engine:
-    image: ollama/ollama:latest
-    container_name: local_agent_engine
+    image: vllm/vllm-openai:latest  # CUDA 12.9+ (requires driver 576.02+)
+    container_name: vllm_inference_engine
     ports:
-      - "11434:11434"
+      - "8000:8000"  # vLLM OpenAI-compatible API
     volumes:
-      - ollama_storage:/root/.ollama
+      - vllm_models:/root/.cache/huggingface  # HuggingFace model cache
+    environment:
+      # Optional: Set HuggingFace token for gated models (not needed for Qwen)
+      # - HF_TOKEN=${HF_TOKEN}
+      - HF_HOME=/root/.cache/huggingface
 
     deploy:
       resources:
@@ -15,40 +19,78 @@ services:
               count: 1
               capabilities: [gpu]
 
+    # Shared memory for PyTorch (critical for vLLM)
+    shm_size: '2gb'
+
     restart: unless-stopped
-    entrypoint: ["/bin/sh", "-c", "/init-ollama.sh"]
+
+    # Custom entrypoint that pre-downloads model then starts vLLM
+    entrypoint: ["/bin/bash", "-c", "/init-vllm.sh"]
+
     configs:
       - source: init_script
-        target: /init-ollama.sh
+        target: /init-vllm.sh
         mode: 0755
 
 volumes:
-  ollama_storage:
+  vllm_models:
+    driver: local
 
 configs:
   init_script:
     content: |
       #!/bin/bash
+      set -e
 
-      apt-get update && apt-get install -y curl
+      echo "==================================="
+      echo "vLLM Initialization Script"
+      echo "==================================="
 
-      # Start the server in the background
-      /bin/ollama serve &
-      pid=$!
+      # Model configuration
+      MODEL_NAME="Qwen/Qwen3-0.6B"
+      CACHE_DIR="/root/.cache/huggingface"
 
-      echo "Waiting for Ollama service to start..."
-      while ! curl -s http://localhost:11434/api/tags > /dev/null; do
-          sleep 1
-      done
+      echo "Installing HuggingFace CLI..."
+      pip install -q huggingface_hub
 
-      echo "Pulling Qwen3 0.6B (The Reasoning Micro-Agent)..."
-      # The tag is likely qwen3:0.6b or just qwen3:0.5b (depending on if they rounded the tag)
-      # Check standard registry, but for now we assume explicit:
-      ollama pull qwen3:0.6b
+      echo ""
+      echo "Checking for model: $$MODEL_NAME"
 
-      echo "2. Pulling Semantic Memory (Embeddings)..."
-      # The 274MB champion.
-      ollama pull nomic-embed-text
+      # Check if model is already cached
+      MODEL_DIR="$$CACHE_DIR/hub/models--Qwen--Qwen3-0.6B"
+      if [ -d "$$MODEL_DIR" ]; then
+        echo "✓ Model already cached at $$MODEL_DIR"
+      else
+        echo "Downloading model from HuggingFace..."
+        echo "This may take a few minutes (model size: ~600MB)..."
 
-      echo "Model ready. Keeping container alive."
-      wait $pid
+        # Use huggingface-cli for cleaner download
+        huggingface-cli download "$$MODEL_NAME" --cache-dir "$$CACHE_DIR" --resume-download
+
+        if [ $$? -eq 0 ]; then
+          echo "✓ Model download complete!"
+        else
+          echo "✗ Error downloading model"
+          exit 1
+        fi
+      fi
+
+      echo ""
+      echo "==================================="
+      echo "Starting vLLM Server..."
+      echo "==================================="
+      echo "Model: $$MODEL_NAME"
+      echo "API Port: 8000"
+      echo "GPU Memory: ~75% (configurable)"
+      echo "==================================="
+      echo ""
+
+      # Start vLLM with optimizations for small GPU
+      exec python3 -m vllm.entrypoints.openai.api_server \
+        --model "$$MODEL_NAME" \
+        --host 0.0.0.0 \
+        --port 8000 \
+        --gpu-memory-utilization 0.75 \
+        --max-model-len 2048 \
+        --dtype auto \
+        --trust-remote-code

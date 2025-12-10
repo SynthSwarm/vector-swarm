@@ -4,3 +4,4 @@ flask
 flask-cors
 scikit-learn
 pandas
+fastembed

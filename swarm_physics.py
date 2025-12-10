@@ -29,6 +29,9 @@ class SwarmPhysics:
         # We manually access the buffer to force overwrite
         vector = vector / np.linalg.norm(vector)
         self.space.vector_view[self.QUEEN_IDX] = vector.astype(np.float32)
+        # Increment counter to make Queen visible (count = 1)
+        if self.space.counter_view[0] < 1:
+            self.space.counter_view[0] = 1
 
     def update_body_signal(self, agent_id, vector):
         """Updates V_body (Layer 3: Atomic Position)"""
