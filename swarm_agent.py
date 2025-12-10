@@ -61,12 +61,12 @@ class VectorAgent:
         if hasattr(self.llm, "chat_completion"):
             # Using LoggedLLMClient wrapper
             response = self.llm.chat_completion(
-                model="qwen3:0.6b", messages=[{"role": "user", "content": prompt}]
+                model="Qwen/Qwen3-0.6B", messages=[{"role": "user", "content": prompt}]
             )
         else:
             # Using raw OpenAI client (fallback for compatibility)
             response = self.llm.chat.completions.create(
-                model="qwen3:0.6b", messages=[{"role": "user", "content": prompt}]
+                model="Qwen/Qwen3-0.6B", messages=[{"role": "user", "content": prompt}]
             )
         options_text = response.choices[0].message.content.split("\n")
         # (Add simple parsing logic here to extract the 3 strings)

@@ -8,6 +8,7 @@ from flask_cors import CORS
 from multiprocessing import Process, Queue, Lock
 from sklearn.decomposition import PCA
 from openai import OpenAI
+from fastembed import TextEmbedding
 
 # Import our custom modules
 from swarm_physics import SwarmPhysics
@@ -26,8 +27,8 @@ app = Flask(__name__)
 CORS(app)  # Enable CORS for your JS frontend
 
 # --- Configuration ---
-OLLAMA_API = "http://localhost:11434/v1"
-EMBED_MODEL = "nomic-embed-text"
+VLLM_API = "http://localhost:8000/v1"  # vLLM OpenAI-compatible endpoint
+EMBED_MODEL = "nomic-ai/nomic-embed-text-v1.5"  # FastEmbed model
 
 # --- Global System State ---
 # We keep these global so Flask routes can access them
@@ -36,7 +37,8 @@ agent_processes = []
 pca_model = PCA(n_components=3)
 pca_fitted = False  # Track if PCA has been fitted
 expected_agent_count = 0  # How many agents we're waiting for
-client = OpenAI(base_url=OLLAMA_API, api_key="ollama")
+llm_client = OpenAI(base_url=VLLM_API, api_key="dummy")  # vLLM client for generation
+embedding_model = None  # Will be initialized in init_system()
 
 # --- Chat Logging Infrastructure ---
 chat_log_queue = None  # Multiprocessing Queue for agent logs
@@ -51,7 +53,7 @@ embedding_lock = None  # Multiprocessing Lock to serialize embedding calls
 # --- Helper: Embedding Wrapper (Thread-Safe) ---
 def get_embedding(text, lock=None):
     """
-    Get embedding from Ollama API with optional locking for multiprocessing safety.
+    Get embedding from FastEmbed with optional locking for multiprocessing safety.
 
     Args:
         text: Text to embed
@@ -63,16 +65,16 @@ def get_embedding(text, lock=None):
     if lock:
         with lock:
             try:
-                response = client.embeddings.create(model=EMBED_MODEL, input=[text])
-                return np.array(response.data[0].embedding, dtype=np.float32)
+                embeddings = list(embedding_model.embed([text]))
+                return np.array(embeddings[0], dtype=np.float32)
             except Exception as e:
                 log(f"Embedding Error: {e}", "EMBED")
                 return np.zeros(768, dtype=np.float32)
     else:
         # No lock (main process usage)
         try:
-            response = client.embeddings.create(model=EMBED_MODEL, input=[text])
-            return np.array(response.data[0].embedding, dtype=np.float32)
+            embeddings = list(embedding_model.embed([text]))
+            return np.array(embeddings[0], dtype=np.float32)
         except Exception as e:
             log(f"Embedding Error: {e}", "EMBED")
             return np.zeros(768, dtype=np.float32)
@@ -130,14 +132,21 @@ def run_agent_process(agent_id, mission, log_queue, embed_lock):
     physics = SwarmPhysics(max_agents=MAX_AGENTS, dim=VECTOR_DIM, create=False)
 
     # 2. Setup Local LLM Client with Logging Wrapper
-    base_client = OpenAI(base_url=OLLAMA_API, api_key="ollama")
+    base_client = OpenAI(base_url=VLLM_API, api_key="dummy")
     logged_client = LoggedLLMClient(base_client, agent_id, log_queue)
 
-    # 3. Create locked embedding function
+    # 3. Initialize FastEmbed model for this process
+    # Each process needs its own embedding model instance
+    global embedding_model
+    log(f"Agent {agent_id} loading FastEmbed model...", "AGENT")
+    embedding_model = TextEmbedding(model_name=EMBED_MODEL)
+    log(f"Agent {agent_id} FastEmbed loaded", "AGENT")
+
+    # 4. Create locked embedding function
     def locked_embed(text):
         return get_embedding(text, lock=embed_lock)
 
-    # 4. Create Agent Instance
+    # 5. Create Agent Instance
     agent = VectorAgent(
         agent_id=agent_id,
         physics_engine=physics,
@@ -147,7 +156,7 @@ def run_agent_process(agent_id, mission, log_queue, embed_lock):
         log_queue=log_queue,  # Pass queue for selection logging
     )
 
-    # 5. The Infinite Loop
+    # 6. The Infinite Loop
     try:
         log(f"Agent {agent_id} entering main loop", "AGENT")
         while True:
@@ -160,10 +169,15 @@ def run_agent_process(agent_id, mission, log_queue, embed_lock):
 
 # --- Server Initialization ---
 def init_system():
-    global physics_engine, chat_log_queue, log_drain_thread, embedding_lock
+    global physics_engine, chat_log_queue, log_drain_thread, embedding_lock, embedding_model
     # Initialize the Physics Engine (Allocates Shared RAM)
     physics_engine = SwarmPhysics(max_agents=MAX_AGENTS, dim=VECTOR_DIM, create=True)
     log("🐝 Swarm Physics Engine initialized", "SYSTEM")
+
+    # Initialize FastEmbed Model
+    log("📊 Loading FastEmbed model...", "SYSTEM")
+    embedding_model = TextEmbedding(model_name=EMBED_MODEL)
+    log("✓ FastEmbed model loaded", "SYSTEM")
 
     # Initialize Chat Log Queue
     chat_log_queue = Queue(maxsize=200)  # Buffer up to 200 messages
