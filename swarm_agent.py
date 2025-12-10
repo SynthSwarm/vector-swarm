@@ -68,7 +68,19 @@ class VectorAgent:
             response = self.llm.chat.completions.create(
                 model="Qwen/Qwen3-0.6B", messages=[{"role": "user", "content": prompt}]
             )
-        options_text = response.choices[0].message.content.split("\n")
+        full_response = response.choices[0].message.content
+
+        # Extract thinking content (between <think> and </think>)
+        thinking_content = None
+        response_without_thinking = full_response
+        if "<think>" in full_response and "</think>" in full_response:
+            start = full_response.find("<think>")
+            end = full_response.find("</think>") + 8  # Include </think> tag
+            thinking_content = full_response[start+7:end-8].strip()  # Extract just the content
+            # Remove the entire <think>...</think> block from response
+            response_without_thinking = full_response[:start] + full_response[end:]
+
+        options_text = response_without_thinking.split("\n")
         # (Add simple parsing logic here to extract the 3 strings)
         candidates = [opt.strip() for opt in options_text if opt.strip()]
 
@@ -107,6 +119,7 @@ class VectorAgent:
                 "candidates": candidates[
                     :5
                 ],  # Log first 5 candidates to avoid huge entries
+                "thinking": thinking_content,  # Include LLM's reasoning process
                 "type": "selection",  # Mark this as a selection log (vs. raw LLM log)
             }
             try:

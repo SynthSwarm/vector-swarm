@@ -377,6 +377,7 @@
 
     /* --- Animations --- */
     @keyframes glow {
+
       0%,
       100% {
         text-shadow: 0 0 5px var(--text-main);
@@ -433,12 +434,25 @@
   </div>
 
   <script>
+    // ============================================================================
+    // VECTOR SWARM VISUALIZATION - OPTIMIZED FOR PERFORMANCE
+    // ============================================================================
+    // Performance optimizations:
+    // 1. Trail capped at MAX_TRAIL_POINTS (500) to prevent unbounded growth
+    // 2. Fast polling (500ms) for smooth real-time updates
+    // 3. Chat logs only re-render when new entries are added
+    // 4. Plotly.react() preserves camera position during updates
+    // 5. Reduced trail marker size (2px) and opacity (0.25) for faster rendering
+    // ============================================================================
+
     // --- Configuration ---
     const API_URL = "http://localhost:5000/api/swarm";
+    const MAX_TRAIL_POINTS = 500; // Cap trail to prevent performance degradation
     let isPolling = false;
     let pollInterval = null;
     let historicalPositions = []; // Store all past agent positions
     let cameraLocked = false; // Lock camera after first plot
+    let lastChatLogCount = 0; // Track chat logs to avoid re-rendering unchanged data
 
     // --- Logger ---
     function log(msg) {
@@ -528,7 +542,7 @@
         // Start Polling Loop
         if (!isPolling) {
           isPolling = true;
-          pollInterval = setInterval(updateViz, 2000); // 1 tick every 2 seconds
+          pollInterval = setInterval(updateViz, 500); // Update every 10000ms for smoother visualization
         }
 
       } catch (e) {
@@ -587,11 +601,18 @@
         drones.forEach(d => {
           historicalPositions.push({ x: d.x, y: d.y, z: d.z });
         });
+
+        // Cap trail size to prevent performance degradation
+        if (historicalPositions.length > MAX_TRAIL_POINTS) {
+          // Remove oldest points to keep trail at max size
+          historicalPositions = historicalPositions.slice(-MAX_TRAIL_POINTS);
+        }
       }
 
       const traces = [];
 
       // 1. Historical Trail (Grey - only agents, not queen)
+      // Performance: Capped at MAX_TRAIL_POINTS for smooth rendering
       if (historicalPositions.length > 0) {
         traces.push({
           x: historicalPositions.map(p => p.x),
@@ -600,7 +621,7 @@
           mode: 'markers',
           type: 'scatter3d',
           name: 'Trail (History)',
-          marker: { size: 3, color: '#666666', opacity: 0.3 },
+          marker: { size: 2, color: '#666666', opacity: 0.25 },
           hoverinfo: 'skip',
           showlegend: false
         });
@@ -666,8 +687,16 @@
 
       if (logs.length === 0) {
         container.innerHTML = '<div style="color: #666; font-style: italic;">&gt; No agent decisions yet...</div>';
+        lastChatLogCount = 0;
         return;
       }
+
+      // Only update if there are new logs (performance optimization)
+      if (logs.length === lastChatLogCount) {
+        return; // No new logs, skip rendering
+      }
+
+      lastChatLogCount = logs.length;
 
       // Build HTML for all log entries
       let html = '';

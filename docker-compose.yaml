@@ -1,6 +1,6 @@
 services:
   llm-engine:
-    image: vllm/vllm-openai:v0.6.6  # CUDA 12.1 compatible (works with 12.8 driver)
+    image: vllm/vllm-openai:latest  # CUDA 12.9+ (requires driver 576.02+)
     container_name: vllm_inference_engine
     ports:
       - "8000:8000"  # vLLM OpenAI-compatible API
