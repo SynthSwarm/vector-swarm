@@ -2,6 +2,7 @@
 Logged LLM Client Wrapper
 Intercepts OpenAI client calls and logs them to a multiprocessing Queue.
 """
+
 from datetime import datetime
 from openai import OpenAI
 
@@ -39,9 +40,7 @@ class LoggedLLMClient:
 
         # Call the actual LLM
         response = self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            **kwargs
+            model=model, messages=messages, **kwargs
         )
 
         # Extract response text
@@ -53,14 +52,14 @@ class LoggedLLMClient:
             "agent_id": self.agent_id,
             "prompt": prompt,
             "response": response_text,
-            "model": model
+            "model": model,
         }
 
-        # Send to queue (non-blocking, will be drained by server)
-        try:
-            self.log_queue.put_nowait(log_entry)
-        except Exception:
-            # If queue is full, just skip logging this entry
-            pass
+        # # Send to queue (non-blocking, will be drained by server)
+        # try:
+        #     self.log_queue.put_nowait(log_entry)
+        # except Exception:
+        #     # If queue is full, just skip logging this entry
+        #     pass
 
         return response
