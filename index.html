@@ -111,6 +111,28 @@
       transition: border 0.2s;
     }
 
+    /* Checkbox styling */
+    .checkbox-container {
+      display: flex;
+      align-items: center;
+      margin-bottom: 15px;
+      cursor: pointer;
+    }
+
+    .checkbox-container input[type="checkbox"] {
+      width: auto;
+      margin-right: 10px;
+      margin-bottom: 0;
+      cursor: pointer;
+      accent-color: var(--text-main);
+    }
+
+    .checkbox-container label {
+      margin-bottom: 0;
+      cursor: pointer;
+      color: var(--text-secondary);
+    }
+
     input[type="text"]:focus,
     input[type="number"]:focus {
       outline: none;
@@ -416,8 +438,14 @@
     <label>SWARM SIZE (Agents)</label>
     <input type="number" id="agent-count" value="5" min="1" max="20">
 
+    <div class="checkbox-container">
+      <input type="checkbox" id="cleanup-on-stop" checked>
+      <label for="cleanup-on-stop">Clean up run collections on halt</label>
+    </div>
+
     <button id="btn-start" onclick="startSwarm()">INITIALIZE SWARM</button>
     <button id="btn-stop" onclick="stopSwarm()">EMERGENCY HALT</button>
+    <button id="btn-pause-viz" onclick="toggleVisualization()" style="background: #333; color: var(--text-secondary);">PAUSE VISUALIZATION</button>
   </div>
 
   <div id="viz-container"></div>
@@ -453,6 +481,7 @@
     let historicalPositions = []; // Store all past agent positions
     let cameraLocked = false; // Lock camera after first plot
     let lastChatLogCount = 0; // Track chat logs to avoid re-rendering unchanged data
+    let visualizationPaused = false; // Allow pausing visualization while simulation runs
 
     // --- Logger ---
     function log(msg) {
@@ -542,7 +571,7 @@
         // Start Polling Loop
         if (!isPolling) {
           isPolling = true;
-          pollInterval = setInterval(updateViz, 500); // Update every 10000ms for smoother visualization
+          pollInterval = setInterval(updateViz, 2000); // Update every 2 seconds (slower for better interaction)
         }
 
       } catch (e) {
@@ -552,10 +581,16 @@
     }
 
     async function stopSwarm() {
-      log("Sending Kill Signal...");
+      const cleanup = document.getElementById('cleanup-on-stop').checked;
+
+      log(`Sending Kill Signal... ${cleanup ? '(with cleanup)' : '(no cleanup)'}`);
       try {
-        await fetch(`${API_URL}/stop`, { method: 'POST' });
-        log("Swarm Halted.");
+        await fetch(`${API_URL}/stop`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cleanup: cleanup })
+        });
+        log(cleanup ? "Swarm Halted. Collections cleaned up." : "Swarm Halted. Collections preserved.");
         setStatus("SYSTEM OFFLINE");
         clearInterval(pollInterval);
         isPolling = false;
@@ -581,12 +616,31 @@
 
         if (json.status !== "active") return;
 
-        renderFrame(json.data);
+        // Skip rendering if visualization is paused (but keep fetching data)
+        if (!visualizationPaused) {
+          renderFrame(json.data);
+        }
+
+        // Always update chat logs even when paused
         renderChatLogs(json.chat_logs || []);
 
       } catch (e) {
         console.error(e);
         // Don't spam logs on poll error, just console
+      }
+    }
+
+    function toggleVisualization() {
+      visualizationPaused = !visualizationPaused;
+      const btn = document.getElementById('btn-pause-viz');
+      if (visualizationPaused) {
+        btn.innerText = 'RESUME VISUALIZATION';
+        btn.style.background = '#ffaa00';
+        log('Visualization paused (data still collecting)');
+      } else {
+        btn.innerText = 'PAUSE VISUALIZATION';
+        btn.style.background = '#333';
+        log('Visualization resumed');
       }
     }
 
@@ -599,31 +653,70 @@
       // Store current drone positions as historical (before adding new ones)
       if (drones.length > 0 && cameraLocked) {
         drones.forEach(d => {
-          historicalPositions.push({ x: d.x, y: d.y, z: d.z });
+          // Extract agent ID from label (e.g., "Agent-0" -> 0)
+          const agentId = parseInt(d.label.split('-')[1]) || 0;
+          historicalPositions.push({ x: d.x, y: d.y, z: d.z, agent_id: agentId });
         });
-
-        // Cap trail size to prevent performance degradation
-        if (historicalPositions.length > MAX_TRAIL_POINTS) {
-          // Remove oldest points to keep trail at max size
-          historicalPositions = historicalPositions.slice(-MAX_TRAIL_POINTS);
-        }
       }
 
       const traces = [];
 
-      // 1. Historical Trail (Grey - only agents, not queen)
-      // Performance: Capped at MAX_TRAIL_POINTS for smooth rendering
+      // Agent color scheme (bright for current positions)
+      const agentColors = [
+        '#00d9ff', // Agent-0: Cyan
+        '#00ff85', // Agent-1: Green
+        '#ff00ff', // Agent-2: Magenta
+        '#ffaa00', // Agent-3: Orange
+        '#ff0055', // Agent-4: Red-Pink
+        '#55ff00', // Agent-5: Lime
+        '#aa00ff', // Agent-6: Purple
+        '#00ffff', // Agent-7: Aqua
+        '#ffff00', // Agent-8: Yellow
+        '#ff5500'  // Agent-9: Orange-Red
+      ];
+
+      // Dimmed colors for historical trail (with alpha baked in)
+      const agentColorsTrail = [
+        'rgba(0, 217, 255, 0.25)', // Agent-0: Cyan (dimmed)
+        'rgba(0, 255, 133, 0.25)', // Agent-1: Green (dimmed)
+        'rgba(255, 0, 255, 0.25)', // Agent-2: Magenta (dimmed)
+        'rgba(255, 170, 0, 0.25)', // Agent-3: Orange (dimmed)
+        'rgba(255, 0, 85, 0.25)',  // Agent-4: Red-Pink (dimmed)
+        'rgba(85, 255, 0, 0.25)',  // Agent-5: Lime (dimmed)
+        'rgba(170, 0, 255, 0.25)', // Agent-6: Purple (dimmed)
+        'rgba(0, 255, 255, 0.25)', // Agent-7: Aqua (dimmed)
+        'rgba(255, 255, 0, 0.25)', // Agent-8: Yellow (dimmed)
+        'rgba(255, 85, 0, 0.25)'   // Agent-9: Orange-Red (dimmed)
+      ];
+
+      // 1. Historical Trail (Per-Agent colored trails)
       if (historicalPositions.length > 0) {
-        traces.push({
-          x: historicalPositions.map(p => p.x),
-          y: historicalPositions.map(p => p.y),
-          z: historicalPositions.map(p => p.z),
-          mode: 'markers',
-          type: 'scatter3d',
-          name: 'Trail (History)',
-          marker: { size: 2, color: '#666666', opacity: 0.25 },
-          hoverinfo: 'skip',
-          showlegend: false
+        // Group historical positions by agent
+        const historicalByAgent = {};
+        historicalPositions.forEach(p => {
+          if (!historicalByAgent[p.agent_id]) {
+            historicalByAgent[p.agent_id] = [];
+          }
+          historicalByAgent[p.agent_id].push(p);
+        });
+
+        // Create a trace for each agent's historical trail
+        Object.keys(historicalByAgent).forEach(agentId => {
+          const positions = historicalByAgent[agentId];
+          traces.push({
+            x: positions.map(p => p.x),
+            y: positions.map(p => p.y),
+            z: positions.map(p => p.z),
+            mode: 'markers',
+            type: 'scatter3d',
+            name: `Agent-${agentId} Trail`,
+            marker: {
+              size: 5,
+              color: agentColorsTrail[parseInt(agentId)] || 'rgba(102, 102, 102, 0.25)'
+            },
+            hoverinfo: 'skip',
+            showlegend: false
+          });
         });
       }
 
@@ -639,28 +732,23 @@
         });
       }
 
-      // 3. Current Drone Positions (Bright)
-      if (drones.length > 0) {
+      // 3. Current Drone Positions (Per-Agent colored, bright)
+      drones.forEach(d => {
+        const agentId = parseInt(d.label.split('-')[1]) || 0;
         traces.push({
-          x: drones.map(d => d.x),
-          y: drones.map(d => d.y),
-          z: drones.map(d => d.z),
+          x: [d.x],
+          y: [d.y],
+          z: [d.z],
           mode: 'markers',
           type: 'scatter3d',
-          name: 'AGENTS (Current)',
-          marker: { size: 7, color: '#00d9ff', opacity: 0.9 },
-          hovertext: drones.map(d => d.label)
+          name: d.label,
+          marker: {
+            size: 8,
+            color: agentColors[agentId] || '#00d9ff'
+          },
+          hovertext: [d.label]
         });
-      }
-
-      // Always preserve user's current camera position/zoom
-      const container = document.getElementById('viz-container');
-      let currentCamera = layout.scene.camera; // Default camera
-
-      // If plot exists, get the current camera state (includes user's manual adjustments)
-      if (container._fullLayout && container._fullLayout.scene && container._fullLayout.scene.camera) {
-        currentCamera = container._fullLayout.scene.camera;
-      }
+      });
 
       // Lock camera after first render (for trail effect)
       if (!cameraLocked && drones.length > 0) {
@@ -668,17 +756,8 @@
         log("Camera locked - swarm trail visualization active");
       }
 
-      // Update layout to preserve camera (always, not just when locked)
-      const updatedLayout = {
-        ...layout,
-        scene: {
-          ...layout.scene,
-          camera: currentCamera
-        }
-      };
-
-      // Use Plotly.react for efficient updates (preserves user interactions)
-      Plotly.react('viz-container', traces, updatedLayout);
+      // Use Plotly.react for efficient updates (naturally preserves camera position)
+      Plotly.react('viz-container', traces, layout);
     }
 
     // --- Chat Log Rendering ---
@@ -743,9 +822,9 @@
 
       container.innerHTML = html;
 
-      // Auto-scroll to bottom (newest entry)
+      // Auto-scroll to top (newest entry at top)
       const chatContainer = document.getElementById('agent-chats');
-      chatContainer.scrollTop = chatContainer.scrollHeight;
+      chatContainer.scrollTop = 0;
     }
 
   </script>

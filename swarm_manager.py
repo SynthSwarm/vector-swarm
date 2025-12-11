@@ -5,6 +5,7 @@ Separated from Flask API layer for cleaner architecture.
 """
 
 import time
+import uuid
 import numpy as np
 import threading
 from datetime import datetime
@@ -17,6 +18,8 @@ from swarm_physics import SwarmPhysics
 from swarm_agent import VectorAgent
 from logged_llm_client import LoggedLLMClient
 from embedding_service import create_embedding_service
+from vector_db_service import VectorDBService
+from agent_memory import QdrantMemoryStore
 
 
 # --- Logging Helper ---
@@ -37,7 +40,8 @@ MAX_CHAT_LOGS = 50
 class SwarmManager:
     """
     Manages the entire swarm system:
-    - Physics engine (shared memory)
+    - Vector database (Qdrant)
+    - Physics engine (Qdrant-backed)
     - Embedding service (multiprocessing)
     - Agent processes
     - PCA model for visualization
@@ -46,9 +50,15 @@ class SwarmManager:
 
     def __init__(self):
         # Core components
+        self.vector_db = None  # VectorDBService instance
         self.physics_engine = None
+        self.memory_store = None  # QdrantMemoryStore instance
         self.embedding_service = None
         self.llm_client = OpenAI(base_url=VLLM_API, api_key="dummy")
+
+        # Run management
+        self.run_id = None  # Current run identifier
+        self.mission_text = None  # Current mission
 
         # Agent management
         self.agent_processes = []
@@ -65,11 +75,26 @@ class SwarmManager:
 
     def initialize(self):
         """Initialize all system components"""
-        # Initialize the Physics Engine (Allocates Shared RAM)
-        self.physics_engine = SwarmPhysics(
-            max_agents=MAX_AGENTS, dim=VECTOR_DIM, create=True
-        )
-        log("🐝 Swarm Physics Engine initialized", "SYSTEM")
+        log("🚀 Initializing Swarm Manager...", "SYSTEM")
+
+        # Initialize Vector Database Service
+        log("📊 Connecting to Qdrant...", "SYSTEM")
+        self.vector_db = VectorDBService(use_grpc=True)
+
+        # Health check
+        if not self.vector_db.health_check():
+            log("❌ Qdrant health check failed! Is the docker container running?", "ERROR")
+            raise ConnectionError("Cannot connect to Qdrant at localhost:6334")
+
+        log("✓ Qdrant connection established", "SYSTEM")
+
+        # Initialize global collections (missions, snapshots)
+        log("Creating global collections...", "SYSTEM")
+        if not self.vector_db.initialize_global_collections():
+            log("❌ Failed to initialize global collections", "ERROR")
+            raise RuntimeError("Global collection initialization failed")
+
+        log("✓ Global collections ready", "SYSTEM")
 
         # Initialize Embedding Service (runs in separate process)
         log("📊 Initializing Embedding Service...", "SYSTEM")
@@ -88,6 +113,8 @@ class SwarmManager:
         )
         self.log_drain_thread.start()
         log("🔄 Log drain thread started", "SYSTEM")
+
+        log("✅ Swarm Manager initialization complete", "SYSTEM")
 
     def get_embedding(self, text):
         """
@@ -138,37 +165,119 @@ class SwarmManager:
             agent_count: Number of agents to spawn
 
         Returns:
-            dict with status, mission, and agent count
+            dict with status, mission, agent count, and run_id
         """
         # Store expected count for PCA fitting logic
         self.expected_agent_count = agent_count
+        self.mission_text = mission
 
         log(f"⚡ START command: '{mission}' with {agent_count} agents", "API")
 
         # 1. Stop existing agents if any
         self.stop_swarm()
 
-        # 2. Inject the Queen Vector (The Mission)
-        log("Embedding queen mission signal...", "API")
-        queen_vec = self.get_embedding(mission)
-        self.physics_engine.set_queen_signal(queen_vec)
-        log("✓ Queen signal injected into shared memory", "API")
+        # 2. Generate new run ID
+        self.run_id = str(uuid.uuid4())
+        log(f"📋 Generated run_id: {self.run_id}", "API")
 
-        # 3. Spawn Agents
+        # 3. Create per-run collections
+        log("Creating per-run collections...", "API")
+        if not self.vector_db.initialize_run_collections(self.run_id):
+            log("❌ Failed to create per-run collections", "ERROR")
+            return {"status": "error", "message": "Failed to create collections"}
+
+        log("✓ Per-run collections created", "API")
+
+        # 3b. Verify collections are ready before spawning agents
+        log("Verifying collections are accessible...", "API")
+        from vector_db_config import get_current_collection_name
+        import time
+        max_retries = 10
+        for i in range(max_retries):
+            try:
+                # Try to get collection info to verify it's ready
+                self.vector_db.client.get_collection(get_current_collection_name(self.run_id))
+                log("✓ Collections verified and ready", "API")
+                break
+            except Exception as e:
+                if i < max_retries - 1:
+                    time.sleep(0.1)  # Wait 100ms before retry
+                else:
+                    log(f"⚠️ Collection verification timeout: {e}", "WARN")
+                    # Continue anyway, agents will retry
+
+        # 4. Initialize memory store for this run
+        self.memory_store = QdrantMemoryStore(
+            run_id=self.run_id,
+            vector_db_service=self.vector_db,
+            vector_dim=VECTOR_DIM
+        )
+
+        # 5. Initialize physics engine
+        self.physics_engine = SwarmPhysics(
+            memory_store=self.memory_store,
+            vector_dim=VECTOR_DIM
+        )
+
+        # 6. Embed and set mission vector (V_queen)
+        log("Embedding mission...", "API")
+        queen_vec = self.get_embedding(mission)
+        self.physics_engine.set_queen_signal(queen_vec, mission, agent_count)
+        log("✓ Mission vector set", "API")
+
+        # 7. Persist mission to global missions collection (for analytics)
+        log("Persisting mission to global collection...", "API")
+        from vector_db_config import MISSIONS_COLLECTION
+
+        mission_payload = {
+            "text": mission,
+            "run_id": self.run_id,
+            "timestamp": datetime.now().isoformat(),
+            "agent_count": agent_count,
+            "status": "running"
+        }
+
+        self.vector_db.upsert_vector(
+            MISSIONS_COLLECTION,
+            self.run_id,  # point_id = run_id
+            queen_vec.tolist(),
+            mission_payload
+        )
+        log("✓ Mission persisted to analytics collection", "API")
+
+        # 8. Spawn Agents
         log(f"Spawning {agent_count} agent processes...", "API")
         for i in range(agent_count):
             p = Process(
                 target=_run_agent_process,
-                args=(i, mission, self.chat_log_queue, self.embedding_service),
+                args=(
+                    i,
+                    self.run_id,
+                    mission,
+                    self.chat_log_queue,
+                    # Don't pass embedding_service - it contains unpicklable multiprocessing objects
+                    # Each agent will create its own embedding client
+                ),
             )
             p.start()
             self.agent_processes.append(p)
         log(f"✓ All {agent_count} agents spawned", "API")
 
-        return {"status": "started", "mission": mission, "agents": agent_count}
+        return {
+            "status": "started",
+            "mission": mission,
+            "agents": agent_count,
+            "run_id": self.run_id
+        }
 
-    def stop_swarm(self):
-        """Stop all running agents and reset state"""
+    def stop_swarm(self, cleanup=None):
+        """
+        Stop all running agents and optionally cleanup collections.
+
+        Args:
+            cleanup: If True, delete per-run collections. If False, preserve them.
+                    If None, use QDRANT_DELETE_ON_COMPLETE config (default behavior).
+        """
         if not self.agent_processes:
             log("No active agents to stop", "API")
             return
@@ -181,14 +290,48 @@ class SwarmManager:
                 log(f"✓ Agent {i} terminated", "API")
         self.agent_processes = []
 
-        # Reset PCA and agent count for next run
+        # Update mission status in global collection
+        if self.run_id:
+            from vector_db_config import MISSIONS_COLLECTION, QDRANT_DELETE_ON_COMPLETE
+
+            # Get current mission data
+            result = self.vector_db.get_by_id(MISSIONS_COLLECTION, self.run_id)
+            if result:
+                vector, payload = result
+                payload["status"] = "completed"
+                # Note: would need to calculate duration, but we don't track start time here
+                self.vector_db.upsert_vector(
+                    MISSIONS_COLLECTION,
+                    self.run_id,
+                    vector,
+                    payload
+                )
+                log("✓ Mission marked as completed in global collection", "API")
+
+            # Determine if cleanup should happen
+            # Priority: explicit cleanup parameter > config default
+            should_cleanup = cleanup if cleanup is not None else QDRANT_DELETE_ON_COMPLETE
+
+            # Cleanup per-run collections if requested
+            if should_cleanup and self.memory_store:
+                log("Cleaning up per-run collections...", "API")
+                if self.memory_store.cleanup():
+                    log("✓ Per-run collections deleted", "API")
+                else:
+                    log("⚠️  Some collections failed to delete", "WARN")
+            elif self.memory_store:
+                log("Per-run collections preserved for inspection", "API")
+
+        # Reset state for next run
         self.pca_fitted = False
         self.expected_agent_count = 0
-
-        # Clear chat logs for next run
         self.chat_logs = []
+        self.run_id = None
+        self.mission_text = None
+        self.physics_engine = None
+        self.memory_store = None
 
-        log("All agents stopped, PCA and chat logs reset for next mission", "API")
+        log("All agents stopped, state reset for next mission", "API")
 
     def get_state(self):
         """
@@ -197,27 +340,49 @@ class SwarmManager:
         Returns:
             dict with status, count, data (3D coordinates), and chat logs
         """
-        # 1. Read Raw Vectors from Shared Memory
-        count = int(self.physics_engine.space.counter_view[0])
+        if not self.memory_store:
+            return {"status": "idle", "data": []}
 
-        # Need at least 3 points for 3D PCA to make sense
-        if count < 3:
+        # 1. Get agent count from Qdrant
+        count = self.memory_store.count_agents()
+
+        # Add 1 for queen
+        total_count = count + 1
+
+        # Need at least 3 points for 3D PCA
+        if total_count < 3:
             return {"status": "waiting_for_entropy", "data": []}
 
-        # Check if all agents have reported in (count = Queen + all agents)
+        # Check if all agents have reported in
         expected_total = self.expected_agent_count + 1  # +1 for Queen
-        if not self.pca_fitted and count < expected_total:
-            log(f"Waiting for all agents to report... ({count}/{expected_total})", "VIZ")
+        if not self.pca_fitted and total_count < expected_total:
+            log(f"Waiting for all agents to report... ({total_count}/{expected_total})", "VIZ")
             return {
                 "status": "waiting_for_agents",
                 "data": [],
-                "count": count,
+                "count": total_count,
                 "expected": expected_total,
             }
 
-        raw_vectors = self.physics_engine.space.vector_view[:count]
+        # 2. Collect vectors for PCA
+        vectors = []
 
-        # 2. Dimensionality Reduction (Fixed PCA - fit once, reuse)
+        # Get queen vector
+        queen_vec = self.memory_store.get_mission()
+        if queen_vec is not None:
+            vectors.append(queen_vec)
+
+        # Get all agent vectors
+        agents = self.memory_store.get_all_agents(limit=MAX_AGENTS)
+        for agent_id, vec, payload in agents:
+            vectors.append(vec)
+
+        if len(vectors) < 3:
+            return {"status": "calculating", "data": []}
+
+        raw_vectors = np.array(vectors, dtype=np.float32)
+
+        # 3. Dimensionality Reduction (Fixed PCA - fit once, reuse)
         try:
             if not self.pca_fitted:
                 # First time: fit the PCA and transform (after all agents have reported)
@@ -237,7 +402,7 @@ class SwarmManager:
 
         snapshot = []
 
-        # 3. Format Data
+        # 4. Format Data
         # Index 0 is QUEEN
         snapshot.append(
             {
@@ -250,22 +415,24 @@ class SwarmManager:
             }
         )
 
-        # Indices 1..N are AGENTS
-        for i in range(1, count):
+        # Remaining indices are AGENTS
+        for i in range(1, len(vectors)):
+            agent_idx = i - 1  # Adjust for queen at index 0
             snapshot.append(
                 {
-                    "id": f"Agent-{i-1}",
+                    "id": f"Agent-{agent_idx}",
                     "type": "drone",
                     "x": float(reduced[i][0]),
                     "y": float(reduced[i][1]),
                     "z": float(reduced[i][2]),
-                    "label": f"Drone-{i-1}",
+                    "label": f"Drone-{agent_idx}",
                 }
             )
 
         return {
             "status": "active",
-            "count": count,
+            "count": len(vectors),
+            "run_id": self.run_id,
             "data": snapshot,
             "chat_logs": self.chat_logs,
         }
@@ -274,45 +441,62 @@ class SwarmManager:
         """Cleanup resources on shutdown"""
         log("Swarm manager cleanup initiated", "SYSTEM")
         self.stop_swarm()
-        if self.physics_engine:
-            self.physics_engine.destroy()
-            log("Shared memory destroyed", "SYSTEM")
+
+        if self.vector_db:
+            self.vector_db.close()
+            log("Vector database connection closed", "SYSTEM")
+
         if self.embedding_service:
             self.embedding_service.shutdown()
             log("Embedding service stopped", "SYSTEM")
 
 
 # --- Agent Process Entry Point (Must be top-level for pickling) ---
-def _run_agent_process(agent_id, mission, log_queue, embedding_service):
+def _run_agent_process(agent_id, run_id, mission, log_queue):
     """
     The entry point for a child process.
-    Re-instantiates the Physics engine (create=False) to attach to shared memory.
+    Attaches to Qdrant collections for the given run_id.
 
     Args:
         agent_id: ID of this agent
+        run_id: UUID for this swarm run
         mission: The mission/task for this agent
         log_queue: multiprocessing.Queue for chat logs
-        embedding_service: Shared embedding service instance
     """
-    log(f"Agent {agent_id} starting up", "AGENT")
+    log(f"Agent {agent_id} starting up (run_id: {run_id})", "AGENT")
 
-    # 1. Attach to Physics Engine
-    physics = SwarmPhysics(max_agents=MAX_AGENTS, dim=VECTOR_DIM, create=False)
+    # 1. Initialize embedding service for this agent
+    # Each agent gets its own embedding service client
+    agent_embedding_service = create_embedding_service(
+        backend_type="fastembed",
+        model_name=EMBED_MODEL
+    )
 
-    # 2. Setup Local LLM Client with Logging Wrapper
+    # 2. Initialize Vector DB Service (use HTTP to avoid gRPC fork issues)
+    vector_db = VectorDBService(use_grpc=False)
+
+    # 3. Create Memory Store (attach to existing run collections)
+    memory_store = QdrantMemoryStore(
+        run_id=run_id,
+        vector_db_service=vector_db,
+        vector_dim=VECTOR_DIM
+    )
+
+    # 4. Initialize Physics Engine
+    physics = SwarmPhysics(memory_store=memory_store, vector_dim=VECTOR_DIM)
+
+    # 5. Setup Local LLM Client with Logging Wrapper
     base_client = OpenAI(base_url=VLLM_API, api_key="dummy")
     logged_client = LoggedLLMClient(base_client, agent_id, log_queue)
 
-    # 3. Helper function to get embeddings
+    # 6. Helper function to get embeddings
     def get_embedding(text):
-        if embedding_service is None:
-            log("Embedding service not initialized!", "ERROR")
-            return np.zeros(VECTOR_DIM, dtype=np.float32)
-        return embedding_service.embed(text)
+        return agent_embedding_service.embed(text)
 
-    # 4. Create Agent Instance
+    # 6. Create Agent Instance
     agent = VectorAgent(
         agent_id=agent_id,
+        run_id=run_id,
         physics_engine=physics,
         llm_client=logged_client,
         embed_func=get_embedding,
@@ -320,7 +504,7 @@ def _run_agent_process(agent_id, mission, log_queue, embedding_service):
         log_queue=log_queue,
     )
 
-    # 5. The Infinite Loop
+    # 7. The Infinite Loop
     try:
         log(f"Agent {agent_id} entering main loop", "AGENT")
         while True:
@@ -329,3 +513,8 @@ def _run_agent_process(agent_id, mission, log_queue, embedding_service):
             time.sleep(np.random.uniform(1.0, 2.0))
     except KeyboardInterrupt:
         log(f"Agent {agent_id} shutting down", "AGENT")
+    finally:
+        # Cleanup
+        agent_embedding_service.shutdown()
+        physics.cleanup()
+        vector_db.close()

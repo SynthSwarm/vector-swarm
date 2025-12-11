@@ -1,126 +1,338 @@
+"""
+Agent Memory Store
+Provides vector storage for swarm physics calculations using Qdrant.
+"""
+
 import numpy as np
-from multiprocessing import shared_memory, Lock, resource_tracker
+from typing import List, Dict, Any, Optional, Tuple
+from datetime import datetime
+import logging
+
+from vector_db_service import VectorDBService
+from vector_db_config import (
+    get_current_collection_name,
+    get_historical_collection_name,
+    get_mission_collection_name
+)
 
 
-class SharedMemoryStore:
-    def __init__(
-        self, name="agent_memory_slab", max_items=10000, vector_dim=768, create=False
-    ):
+logger = logging.getLogger(__name__)
+
+
+class QdrantMemoryStore:
+    """
+    Qdrant-backed memory store for swarm physics.
+    Replaces the previous SharedMemoryStore with persistent vector database storage.
+    """
+
+    def __init__(self, run_id: str, vector_db_service: VectorDBService, vector_dim: int = 768):
         """
-        A zero-copy shared memory vector store.
+        Initialize Qdrant-backed memory store.
 
         Args:
-            name: Unique name for the memory block.
-            max_items: Maximum capacity of vectors (pre-allocated).
-            vector_dim: Dimension of embeddings (768 for nomic-embed-text).
-            create: Set True for the 'Server/Writer' process, False for 'Agent/Reader'.
+            run_id: Unique identifier for this swarm run
+            vector_db_service: Initialized VectorDBService instance
+            vector_dim: Dimension of embeddings (768 for nomic-embed-text-v1.5)
         """
-        self.name = name
-        self.max_items = max_items
+        self.run_id = run_id
+        self.db = vector_db_service
         self.vector_dim = vector_dim
-        self.lock_name = f"{name}_lock"
-        self.meta_name = f"{name}_meta"
 
-        # Calculate bytes needed: Vectors (float32) + Count (int64)
-        # We reserve the first 8 bytes (int64) to store the 'current_count' of items
-        self.vector_size = max_items * vector_dim * 4  # 4 bytes per float32
-        self.total_size = self.vector_size + 8
+        # Collection names for this run
+        self.current_collection = get_current_collection_name(run_id)
+        self.historical_collection = get_historical_collection_name(run_id)
+        self.mission_collection = get_mission_collection_name(run_id)
 
-        if create:
-            try:
-                # Cleanup old memory if it exists (for dev cycles)
-                try:
-                    existing = shared_memory.SharedMemory(name=self.name)
-                    existing.close()
-                    existing.unlink()
-                except FileNotFoundError:
-                    pass
+        logger.info(f"QdrantMemoryStore initialized for run_id: {run_id}")
 
-                self.shm = shared_memory.SharedMemory(
-                    create=True, size=self.total_size, name=self.name
-                )
-                # Initialize count to 0
-                self.shm.buf[:8] = np.array([0], dtype=np.int64).tobytes()
-                print(
-                    f"[Memory] Allocated {self.total_size / 1024 / 1024:.2f} MB shared slab."
-                )
-            except FileExistsError:
-                self.shm = shared_memory.SharedMemory(name=self.name)
-        else:
-            self.shm = shared_memory.SharedMemory(name=self.name)
+    # Mission Vector Operations (V_queen)
 
-        # Create numpy view of the entire buffer
-        # 1. Counter View (First 8 bytes)
-        self.counter_view = np.ndarray(
-            (1,), dtype=np.int64, buffer=self.shm.buf, offset=0
-        )
-
-        # 2. Vector View (Rest of the buffer)
-        self.vector_view = np.ndarray(
-            (max_items, vector_dim), dtype=np.float32, buffer=self.shm.buf, offset=8
-        )
-
-        # Simple file-based lock for cross-process write safety
-        # (For production systems, use a semaphore, but file lock is robust for local)
-        self.lock = Lock()
-
-    def add(self, vector):
+    def set_mission(self, vector: np.ndarray, mission_text: str, agent_count: int) -> bool:
         """
-        Writes a vector to the shared slab. Thread/Process safe.
+        Set the mission vector (V_queen) for this run.
+
+        Args:
+            vector: Mission embedding vector
+            mission_text: Mission description text
+            agent_count: Number of agents in swarm
+
+        Returns:
+            True if successful
         """
-        # Normalize vector first (L2 norm) for cosine similarity
+        # Normalize vector
         norm = np.linalg.norm(vector)
         if norm > 0:
             vector = vector / norm
 
-        with self.lock:
-            idx = self.counter_view[0]
-            if idx >= self.max_items:
-                raise MemoryError("Shared memory slab is full. Increase max_items.")
+        payload = {
+            "text": mission_text,
+            "run_id": self.run_id,
+            "timestamp": datetime.now().isoformat(),
+            "agent_count": agent_count
+        }
 
-            # Write direct to memory
-            self.vector_view[idx] = vector.astype(np.float32)
-            self.counter_view[0] += 1
-            return idx
+        success = self.db.upsert_vector(
+            self.mission_collection,
+            "00000000-0000-0000-0000-000000000000",  # Well-known UUID for mission
+            vector.tolist(),
+            payload
+        )
 
-    def search(self, query_vector, k=5):
+        if success:
+            logger.info(f"Mission vector set for run {self.run_id}")
+        return success
+
+    def get_mission(self) -> Optional[np.ndarray]:
         """
-        Performs a lock-free Matrix Multiplication (Dot Product) over the shared memory.
-        Returns: indices, scores
+        Get the mission vector (V_queen).
+
+        Returns:
+            Mission vector as numpy array, or None if not found
+        """
+        result = self.db.get_by_id(self.mission_collection, "00000000-0000-0000-0000-000000000000")
+        if result:
+            vector, payload = result
+            return np.array(vector, dtype=np.float32)
+        return None
+
+    # Current Agent Operations (V_body, V_next)
+
+    def upsert_agent(self, agent_id: int, vector: np.ndarray, payload: Dict[str, Any]) -> bool:
+        """
+        Upsert agent's current vector (V_body or V_next).
+        Each agent has one point in the current collection, identified by agent_id.
+
+        Args:
+            agent_id: Agent identifier
+            vector: Agent's current vector
+            payload: Metadata (text, timestamp, action_type, status)
+
+        Returns:
+            True if successful
+        """
+        # Normalize vector
+        norm = np.linalg.norm(vector)
+        if norm > 0:
+            vector = vector / norm
+
+        # Ensure agent_id is in payload
+        payload["agent_id"] = agent_id
+        if "timestamp" not in payload:
+            payload["timestamp"] = datetime.now().isoformat()
+
+        return self.db.upsert_vector(
+            self.current_collection,
+            agent_id,  # point_id = agent_id (integer)
+            vector.tolist(),
+            payload
+        )
+
+    def get_agent(self, agent_id: int) -> Optional[Tuple[np.ndarray, Dict[str, Any]]]:
+        """
+        Get agent's current vector and metadata.
+
+        Args:
+            agent_id: Agent identifier
+
+        Returns:
+            (vector, payload) tuple or None if not found
+        """
+        result = self.db.get_by_id(self.current_collection, agent_id)
+        if result:
+            vector, payload = result
+            return np.array(vector, dtype=np.float32), payload
+        return None
+
+    def get_all_agents(self, exclude_agent_id: Optional[int] = None, limit: int = 1000) -> List[Tuple[int, np.ndarray, Dict[str, Any]]]:
+        """
+        Get all agent vectors (for flock calculations).
+
+        Args:
+            exclude_agent_id: Optional agent ID to exclude
+            limit: Maximum number of agents to retrieve
+
+        Returns:
+            List of (agent_id, vector, payload) tuples
+        """
+        all_agents = self.db.get_all_from_collection(
+            self.current_collection,
+            limit=limit,
+            offset=0
+        )
+
+        results = []
+        for point_id, vector, payload in all_agents:
+            # Convert point_id to int (it might be string or int)
+            try:
+                agent_id = int(point_id) if isinstance(point_id, str) else point_id
+            except ValueError:
+                # Skip non-integer point IDs (shouldn't happen in current collection)
+                continue
+
+            # Skip excluded agent
+            if exclude_agent_id is not None and agent_id == exclude_agent_id:
+                continue
+
+            results.append((
+                agent_id,
+                np.array(vector, dtype=np.float32),
+                payload
+            ))
+
+        return results
+
+    def count_agents(self) -> int:
+        """
+        Count active agents in current collection.
+
+        Returns:
+            Number of agents
+        """
+        agents = self.db.get_all_from_collection(
+            self.current_collection,
+            limit=10000  # High limit to get all
+        )
+        return len(agents)
+
+    # Historical Actions (V_been)
+
+    def append_historical(self, agent_id: int, vector: np.ndarray,
+                         text: str, score: float, step: int) -> Optional[str]:
+        """
+        Append completed action to historical collection.
+
+        Args:
+            agent_id: Agent who performed the action
+            vector: Action embedding vector
+            text: Action description
+            score: Alignment score (dot product with v_next)
+            step: Agent step number
+
+        Returns:
+            Point ID if successful, None otherwise
+        """
+        # Normalize vector
+        norm = np.linalg.norm(vector)
+        if norm > 0:
+            vector = vector / norm
+
+        payload = {
+            "text": text,
+            "agent_id": agent_id,
+            "timestamp": datetime.now().isoformat(),
+            "score": float(score),
+            "step": step
+        }
+
+        point_id = self.db.append_vector(
+            self.historical_collection,
+            vector.tolist(),
+            payload
+        )
+
+        if point_id:
+            logger.debug(f"Agent {agent_id} action appended to history: {text[:50]}...")
+        return point_id
+
+    def search_historical(self, query_vector: np.ndarray,
+                         limit: int = 10,
+                         score_threshold: Optional[float] = None) -> List[Tuple[str, float, Dict[str, Any]]]:
+        """
+        Search historical actions by similarity.
+
+        Args:
+            query_vector: Query embedding
+            limit: Max results to return
+            score_threshold: Minimum similarity score
+
+        Returns:
+            List of (point_id, score, payload) tuples
         """
         # Normalize query
         norm = np.linalg.norm(query_vector)
         if norm > 0:
             query_vector = query_vector / norm
 
-        # Get current count (atomic read of int64 is safe enough for this)
-        current_count = self.counter_view[0]
+        results = self.db.search_similar(
+            self.historical_collection,
+            query_vector.tolist(),
+            limit=limit,
+            score_threshold=score_threshold
+        )
 
-        if current_count == 0:
-            return [], []
+        return results
 
-        # Slice only the active memory (Zero-Copy View)
-        active_memory = self.vector_view[:current_count]
+    # Physics Helper Methods
 
-        # The Magic: Matrix Multiplication (Batch Dot Product)
-        # This runs in C via Numpy, bypassing Python loop overhead
-        scores = np.dot(active_memory, query_vector)
+    def calculate_flock_vector(self, exclude_agent_id: Optional[int] = None) -> Optional[np.ndarray]:
+        """
+        Calculate average vector of all other agents (V_flock).
 
-        # Get top K
-        # argpartition is faster than sort for top-k
-        k = min(k, current_count)
-        top_k_indices = np.argpartition(scores, -k)[-k:]
+        Args:
+            exclude_agent_id: Agent to exclude from calculation
 
-        # Sort the top k by score descending
-        top_k_indices = top_k_indices[np.argsort(scores[top_k_indices])][::-1]
-        top_k_scores = scores[top_k_indices]
+        Returns:
+            Mean vector of other agents, or None if no agents
+        """
+        agents = self.get_all_agents(exclude_agent_id=exclude_agent_id)
 
-        return top_k_indices.tolist(), top_k_scores.tolist()
+        if not agents:
+            return None
+
+        vectors = np.array([vec for _, vec, _ in agents], dtype=np.float32)
+        mean_vec = np.mean(vectors, axis=0)
+
+        # Normalize
+        norm = np.linalg.norm(mean_vec)
+        if norm > 0:
+            mean_vec = mean_vec / norm
+
+        return mean_vec
+
+    def find_closest_agent(self, my_vector: np.ndarray, my_agent_id: int) -> Optional[Tuple[int, np.ndarray, float]]:
+        """
+        Find the closest agent to the given vector (for separation).
+
+        Args:
+            my_vector: Current agent's vector
+            my_agent_id: Current agent's ID (to exclude self)
+
+        Returns:
+            (agent_id, vector, similarity) tuple of closest agent, or None
+        """
+        agents = self.get_all_agents(exclude_agent_id=my_agent_id)
+
+        if not agents:
+            return None
+
+        # Calculate similarities
+        max_sim = -1.0
+        closest_agent = None
+
+        for agent_id, vector, payload in agents:
+            sim = np.dot(my_vector, vector)
+            if sim > max_sim:
+                max_sim = sim
+                closest_agent = (agent_id, vector, float(sim))
+
+        return closest_agent
+
+    # Lifecycle Methods
 
     def close(self):
-        self.shm.close()
+        """
+        Close the memory store.
+        Note: Qdrant client is managed by VectorDBService, not closed here.
+        """
+        logger.info(f"QdrantMemoryStore closed for run {self.run_id}")
 
-    def destroy(self):
-        """Call this only from the creator process on shutdown"""
-        self.shm.close()
-        self.shm.unlink()
+    def cleanup(self) -> bool:
+        """
+        Delete all per-run collections for this run.
+        Call this after run completion if cleanup is desired.
+
+        Returns:
+            True if all collections deleted successfully
+        """
+        logger.info(f"Cleaning up collections for run {self.run_id}")
+        return self.db.cleanup_run_collections(self.run_id)

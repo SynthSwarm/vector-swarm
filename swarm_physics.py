@@ -1,106 +1,160 @@
+"""
+Swarm Physics Engine
+Implements the Resolution Equation for agent trajectory calculation using Qdrant.
+"""
+
 import numpy as np
-from agent_memory import SharedMemoryStore
+import logging
+from agent_memory import QdrantMemoryStore
+
+
+logger = logging.getLogger(__name__)
+
 
 class SwarmPhysics:
-    def __init__(self, max_agents=50, dim=768, create=False):
+    """
+    The Physics Engine of the Vector Swarm.
+    Calculates agent trajectories based on mission alignment, flock behavior, and separation.
+    """
+
+    def __init__(self, memory_store: QdrantMemoryStore, vector_dim: int = 768):
         """
-        The Physics Engine of the Vector Swarm.
-        Manages the positions of all agents and the Queen.
+        Initialize the physics engine.
+
+        Args:
+            memory_store: QdrantMemoryStore instance for this run
+            vector_dim: Dimension of embeddings (768 for nomic-embed-text-v1.5)
         """
-        self.dim = dim
-        
-        # 1. The Queen's Signal (Immutable, Global)
-        # We store this in a tiny separate shared block or just pass it in.
-        # For simplicity, we assume the Queen is set once in the shared slab at index 0.
-        # Indices 1 to max_agents are for the agents.
-        self.space = SharedMemoryStore(
-            name="swarm_physics_plane", 
-            max_items=max_agents + 1, 
-            vector_dim=dim, 
-            create=create
-        )
-        
-        # Reserved Index 0 is the QUEEN
-        self.QUEEN_IDX = 0
+        self.memory = memory_store
+        self.dim = vector_dim
+        logger.info(f"SwarmPhysics initialized for run {memory_store.run_id}")
 
-    def set_queen_signal(self, vector):
-        """Sets V_queen (Layer 1: The Mission)"""
-        # Overwrite index 0
-        # We manually access the buffer to force overwrite
-        vector = vector / np.linalg.norm(vector)
-        self.space.vector_view[self.QUEEN_IDX] = vector.astype(np.float32)
-        # Increment counter to make Queen visible (count = 1)
-        if self.space.counter_view[0] < 1:
-            self.space.counter_view[0] = 1
+    def set_queen_signal(self, vector: np.ndarray, mission_text: str, agent_count: int) -> bool:
+        """
+        Sets V_queen (Layer 1: The Mission).
 
-    def update_body_signal(self, agent_id, vector):
-        """Updates V_body (Layer 3: Atomic Position)"""
-        # Map agent_id (0, 1, 2) to memory slots (1, 2, 3)
-        slot = agent_id + 1
-        
-        norm = np.linalg.norm(vector)
-        if norm > 0: vector = vector / norm
-        
-        self.space.vector_view[slot] = vector.astype(np.float32)
-        # Ensure counter is high enough to make this slot "visible"
-        if self.space.counter_view[0] < slot + 1:
-             self.space.counter_view[0] = slot + 1
+        Args:
+            vector: Mission embedding vector
+            mission_text: Mission description
+            agent_count: Number of agents in swarm
 
-    def calculate_trajectory(self, agent_id, w_c=1.0, w_a=0.5, w_s=0.8):
+        Returns:
+            True if successful
+        """
+        success = self.memory.set_mission(vector, mission_text, agent_count)
+        if success:
+            logger.info(f"Queen signal set: {mission_text[:50]}...")
+        return success
+
+    def update_body_signal(self, agent_id: int, vector: np.ndarray,
+                          text: str, action_type: str = "body",
+                          status: str = "active") -> bool:
+        """
+        Updates V_body (Layer 3: Atomic Position).
+        Upserts agent's current vector to the current collection.
+
+        Args:
+            agent_id: Agent identifier
+            vector: Agent's current vector
+            text: Current action description
+            action_type: "body" or "next"
+            status: "active", "completed", or "blocked"
+
+        Returns:
+            True if successful
+        """
+        payload = {
+            "text": text,
+            "action_type": action_type,
+            "status": status
+        }
+
+        success = self.memory.upsert_agent(agent_id, vector, payload)
+        if success:
+            logger.debug(f"Agent {agent_id} body signal updated: {text[:30]}...")
+        return success
+
+    def calculate_trajectory(self, agent_id: int, w_c: float = 1.0,
+                           w_a: float = 0.5, w_s: float = 0.8) -> np.ndarray:
         """
         THE RESOLUTION EQUATION (Section 5.2)
-        Returns V_next: The ideal vector direction the agent *should* move towards.
-        """
-        slot = agent_id + 1
-        
-        # 1. Get V_queen (Cohesion)
-        v_queen = self.space.vector_view[self.QUEEN_IDX]
-        
-        # 2. Get V_flock (Alignment)
-        # Average of all *other* active agents
-        # We grab the whole buffer up to current count
-        limit = self.space.counter_view[0]
-        # Exclude Queen (0) and Self (slot)
-        others_indices = [i for i in range(1, limit) if i != slot]
+        Returns V_next: The ideal vector direction the agent should move towards.
 
-        # Early exit if no other agents
-        if not others_indices:
+        Formula: V_next = (w_c * V_queen) + (w_a * V_flock) + (w_s * V_separation)
+
+        Args:
+            agent_id: Agent whose trajectory to calculate
+            w_c: Cohesion weight (obedience to mission) - default 1.0
+            w_a: Alignment weight (social conformity) - default 0.5
+            w_s: Separation weight (personal space) - default 0.8
+
+        Returns:
+            Normalized V_next vector
+        """
+        # 1. Get V_queen (Cohesion)
+        v_queen = self.memory.get_mission()
+        if v_queen is None:
+            logger.warning("Mission vector not set, using zero vector for cohesion")
+            v_queen = np.zeros(self.dim, dtype=np.float32)
+
+        # 2. Get agent's current vector
+        agent_result = self.memory.get_agent(agent_id)
+        if agent_result is None:
+            logger.warning(f"Agent {agent_id} not found in current collection")
+            # Return just the mission vector as fallback
+            return v_queen
+
+        my_vec, _ = agent_result
+
+        # 3. Calculate V_flock (Alignment)
+        # Average of all other active agents
+        v_flock = self.memory.calculate_flock_vector(exclude_agent_id=agent_id)
+        if v_flock is None:
+            # No other agents, use zero vector
             v_flock = np.zeros(self.dim, dtype=np.float32)
             v_separation = np.zeros(self.dim, dtype=np.float32)
         else:
-            # Get all other agents' vectors once
-            others_vectors = self.space.vector_view[others_indices]
+            # 4. Calculate V_separation (Repulsion from closest neighbor)
+            closest = self.memory.find_closest_agent(my_vec, agent_id)
 
-            # 2. Calculate V_flock (Alignment)
-            v_flock = np.mean(others_vectors, axis=0)
-            v_flock = v_flock / (np.linalg.norm(v_flock) + 1e-9)
-
-            # 3. Get V_body Repulsion (Separation)
-            # Find the CLOSEST neighbor and create a repulsive vector
-            my_vec = self.space.vector_view[slot]
-            # Calculate distances to all others
-            # (Using dot product as proxy for distance in unit sphere)
-            sims = np.dot(others_vectors, my_vec)
-            closest_idx = np.argmax(sims)
-
-            # Repulsion vector is: My_Pos - Their_Pos
-            # "Push me away from them"
-            closest_vec = others_vectors[closest_idx]
-            repulsion = my_vec - closest_vec
-            if np.linalg.norm(repulsion) > 0:
-                v_separation = repulsion / np.linalg.norm(repulsion)
-            else:
+            if closest is None:
+                # No other agents (shouldn't happen if v_flock is not None, but safety)
                 v_separation = np.zeros(self.dim, dtype=np.float32)
+            else:
+                closest_id, closest_vec, similarity = closest
 
-        # 4. Synthesize V_next
+                # Repulsion vector: My position - Their position
+                # "Push me away from them"
+                repulsion = my_vec - closest_vec
+                norm = np.linalg.norm(repulsion)
+
+                if norm > 1e-9:
+                    v_separation = repulsion / norm
+                else:
+                    v_separation = np.zeros(self.dim, dtype=np.float32)
+
+                logger.debug(f"Agent {agent_id} closest neighbor: {closest_id} (sim={similarity:.3f})")
+
+        # 5. Synthesize V_next
         # V_next = (w_c * V_queen) + (w_a * V_flock) + (w_s * V_separation)
         v_next = (w_c * v_queen) + (w_a * v_flock) + (w_s * v_separation)
-        
-        # Normalize Result
-        return v_next / (np.linalg.norm(v_next) + 1e-9)
-    
+
+        # Normalize result
+        norm = np.linalg.norm(v_next)
+        if norm > 1e-9:
+            v_next = v_next / norm
+        else:
+            # Fallback to mission vector if result is zero
+            logger.warning(f"Agent {agent_id} trajectory is zero, falling back to mission")
+            v_next = v_queen
+
+        return v_next
+
     def cleanup(self):
-        self.space.close()
-    
+        """Close the memory store."""
+        self.memory.close()
+
     def destroy(self):
-        self.space.destroy()
+        """Delete all per-run collections (if cleanup is desired)."""
+        logger.info(f"Destroying per-run collections for {self.memory.run_id}")
+        self.memory.cleanup()
