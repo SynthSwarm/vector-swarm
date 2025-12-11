@@ -4,6 +4,7 @@ Defines collection schemas, HNSW parameters, and metadata fields for Qdrant.
 """
 
 import os
+import hashlib
 from dataclasses import dataclass
 from typing import Dict, Any
 from qdrant_client.models import Distance, VectorParams, HnswConfigDiff
@@ -65,19 +66,38 @@ def get_vector_params() -> VectorParams:
 # Per-Run Collection Templates
 # These are created dynamically for each swarm run with run_id
 
+def _short_hash(run_id: str, length: int = 6) -> str:
+    """
+    Generate a short deterministic hash from a UUID.
+    Used for readable collection names while maintaining uniqueness.
+
+    Args:
+        run_id: Full UUID string
+        length: Number of hex characters to return (default: 6)
+
+    Returns:
+        Short hash string (e.g., "a3f2bc" for a UUID)
+    """
+    hash_digest = hashlib.sha256(run_id.encode('utf-8')).hexdigest()
+    return hash_digest[:length]
+
+
 def get_historical_collection_name(run_id: str) -> str:
     """Get collection name for historical actions (V_been)."""
-    return f"run_{run_id}_historical"
+    short_id = _short_hash(run_id)
+    return f"run_{short_id}_historical"
 
 
 def get_current_collection_name(run_id: str) -> str:
     """Get collection name for current actions (V_body + V_next)."""
-    return f"run_{run_id}_current"
+    short_id = _short_hash(run_id)
+    return f"run_{short_id}_current"
 
 
 def get_mission_collection_name(run_id: str) -> str:
     """Get collection name for mission vector (V_queen)."""
-    return f"run_{run_id}_mission"
+    short_id = _short_hash(run_id)
+    return f"run_{short_id}_mission"
 
 
 # Global Collection Names
