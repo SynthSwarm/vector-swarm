@@ -5,3 +5,4 @@ flask-cors
 scikit-learn
 pandas
 fastembed
+qdrant-client>=1.7.0
