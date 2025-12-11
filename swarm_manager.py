@@ -472,8 +472,8 @@ def _run_agent_process(agent_id, run_id, mission, log_queue):
         model_name=EMBED_MODEL
     )
 
-    # 2. Initialize Vector DB Service
-    vector_db = VectorDBService(use_grpc=True)
+    # 2. Initialize Vector DB Service (use HTTP to avoid gRPC fork issues)
+    vector_db = VectorDBService(use_grpc=False)
 
     # 3. Create Memory Store (attach to existing run collections)
     memory_store = QdrantMemoryStore(
