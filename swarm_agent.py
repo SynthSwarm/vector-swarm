@@ -14,6 +14,7 @@ class VectorAgent:
     def __init__(
         self,
         agent_id,
+        run_id,
         physics_engine: SwarmPhysics,
         llm_client,
         embed_func,
@@ -21,11 +22,13 @@ class VectorAgent:
         log_queue=None,
     ):
         self.id = agent_id
+        self.run_id = run_id
         self.physics = physics_engine
         self.llm = llm_client
         self.embed = embed_func
         self.current_task = starting_task
         self.log_queue = log_queue  # For detailed selection logging
+        self.step_count = 0  # Track agent steps
 
         # Weights (Personality)
         self.w_c = 1.0  # Obedience to Queen
@@ -33,10 +36,18 @@ class VectorAgent:
         self.w_s = 0.8  # Personal Space
 
     def step(self):
+        self.step_count += 1
+
         # 1. Update my Body Vector in the shared universe
         # "I am currently analyzing logs"
         my_vec = self.embed(self.current_task)
-        self.physics.update_body_signal(self.id, my_vec)
+        self.physics.update_body_signal(
+            self.id,
+            my_vec,
+            text=self.current_task,
+            action_type="body",
+            status="active"
+        )
 
         # 2. Calculate the Desired Trajectory (V_next)
         # This uses the Resolution Equation
@@ -53,7 +64,7 @@ class VectorAgent:
         Examples: 1. [Analyze recent data logs]
                   2. [Communicate with nearby agents]
 
-        IMPORTANT: 
+        IMPORTANT:
         * Do not add newlines in an action
         * Separate each action with a newline
         """
@@ -106,14 +117,32 @@ class VectorAgent:
 
         # 5. Act (Move)
         log(f"✓ Selected: '{best_action}' (score={best_score:.3f})", self.id)
+
+        # 6. Append completed action to historical collection (V_been)
+        # The OLD current_task is what we just finished
+        old_task = self.current_task
+        old_task_vec = my_vec  # We already embedded it above
+
+        # Append to historical collection
+        memory_store = self.physics.memory
+        memory_store.append_historical(
+            agent_id=self.id,
+            vector=old_task_vec,
+            text=old_task,
+            score=float(best_score),  # Score of the action we're moving to
+            step=self.step_count
+        )
+
+        # 7. Update current task to the new best action
         self.current_task = best_action
 
-        # 6. Log Selection Details (if queue available)
+        # 8. Log Selection Details (if queue available)
         if self.log_queue:
             timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             selection_log = {
                 "timestamp": timestamp,
                 "agent_id": self.id,
+                "run_id": self.run_id,
                 "selected_action": best_action,
                 "alignment_score": float(best_score),
                 "candidates": candidates[
@@ -121,6 +150,7 @@ class VectorAgent:
                 ],  # Log first 5 candidates to avoid huge entries
                 "thinking": thinking_content,  # Include LLM's reasoning process
                 "type": "selection",  # Mark this as a selection log (vs. raw LLM log)
+                "step": self.step_count,
             }
             try:
                 self.log_queue.put_nowait(selection_log)
