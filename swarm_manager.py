@@ -116,12 +116,13 @@ class SwarmManager:
 
         log("✅ Swarm Manager initialization complete", "SYSTEM")
 
-    def get_embedding(self, text):
+    def get_embedding(self, text, task_type="search_document"):
         """
         Get embedding using the embedding service.
 
         Args:
             text: Text to embed
+            task_type: Task instruction prefix for the embedding model
 
         Returns:
             numpy array of embeddings
@@ -130,7 +131,7 @@ class SwarmManager:
             log("Embedding service not initialized!", "ERROR")
             return np.zeros(VECTOR_DIM, dtype=np.float32)
 
-        return self.embedding_service.embed(text)
+        return self.embedding_service.embed(text, task_type=task_type)
 
     def _drain_log_queue(self):
         """
@@ -490,8 +491,8 @@ def _run_agent_process(agent_id, run_id, mission, log_queue):
     logged_client = LoggedLLMClient(base_client, agent_id, log_queue)
 
     # 6. Helper function to get embeddings
-    def get_embedding(text):
-        return agent_embedding_service.embed(text)
+    def get_embedding(text, task_type="search_document"):
+        return agent_embedding_service.embed(text, task_type=task_type)
 
     # 6. Create Agent Instance
     agent = VectorAgent(

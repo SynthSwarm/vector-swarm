@@ -3,6 +3,24 @@ Embedding Service - Abstraction layer for text embeddings
 
 Provides a clean interface for embedding text that can work with different
 backends (FastEmbed, OpenAI, etc.) and handles multiprocessing properly.
+
+Task Type Prefixes (for nomic-embed models):
+-------------------------------------------
+The nomic-embed models require task-specific prefixes for optimal performance:
+
+- "search_document": Use when STORING/INDEXING data (e.g., agent observations, documents)
+                    This is the default and appropriate for most storage operations.
+
+- "search_query": Use when SEARCHING for relevant documents (e.g., user queries, search terms)
+                 Use this when creating query vectors for search_historical() or similar functions.
+
+- "clustering": Use when GROUPING texts by semantic similarity
+               Appropriate for finding related items or topic clustering.
+
+- "classification": Use when extracting features for classification tasks
+                   Useful when embeddings will be used as input to classifiers.
+
+For more details, see: https://huggingface.co/nomic-ai/nomic-embed-text-v1.5#usage
 """
 
 import numpy as np
@@ -24,12 +42,15 @@ class EmbeddingBackend(ABC):
     """Abstract base class for embedding backends"""
 
     @abstractmethod
-    def embed(self, text: str) -> np.ndarray:
+    def embed(self, text: str, task_type: str = "search_document") -> np.ndarray:
         """
         Embed a single text string.
 
         Args:
             text: Text to embed
+            task_type: Task instruction prefix for embedding models that support it.
+                      Options: "search_document", "search_query", "clustering", "classification"
+                      Default: "search_document" (for indexing/storing data)
 
         Returns:
             numpy array of embeddings
@@ -53,11 +74,19 @@ class FastEmbedBackend(EmbeddingBackend):
         self.dimension = 768  # nomic-embed-text-v1.5 dimension
         log("✓ FastEmbed model loaded")
 
-    def embed(self, text: str) -> np.ndarray:
-        """Embed text using FastEmbed"""
-        text = text.replace("\n", " ")
+    def embed(self, text: str, task_type: str = "search_document") -> np.ndarray:
+        """
+        Embed text using FastEmbed with task instruction prefix.
+
+        For nomic-embed models, prepends task_type prefix (e.g., "search_document: <text>")
+        as recommended in the model documentation.
+        """
+        # Prepend task prefix for nomic models
+        prefixed_text = f"{task_type}: {text}"
+        prefixed_text = prefixed_text.replace("\n", " ")
+
         try:
-            embeddings = list(self.model.embed([text]))
+            embeddings = list(self.model.embed([prefixed_text]))
             return np.array(embeddings[0], dtype=np.float32)
         except Exception as e:
             log(f"FastEmbed error: {e}", "ERROR")
@@ -77,8 +106,13 @@ class OpenAIEmbedBackend(EmbeddingBackend):
         self.dimension = 1536  # text-embedding-3-small dimension
         log(f"Using OpenAI embeddings: {model}")
 
-    def embed(self, text: str) -> np.ndarray:
-        """Embed text using OpenAI API"""
+    def embed(self, text: str, task_type: str = "search_document") -> np.ndarray:
+        """
+        Embed text using OpenAI API.
+
+        Note: task_type parameter is accepted for interface compatibility but not used,
+        as OpenAI embeddings don't require task instruction prefixes.
+        """
         text = text.replace("\n", " ")
         try:
             response = self.client.embeddings.create(
@@ -147,9 +181,10 @@ class EmbeddingService:
 
                 request_id = request['id']
                 text = request['text']
+                task_type = request.get('task_type', 'search_document')
 
-                # Perform embedding
-                embedding = backend.embed(text)
+                # Perform embedding with task type
+                embedding = backend.embed(text, task_type=task_type)
 
                 # Send response back
                 response = {
@@ -165,12 +200,13 @@ class EmbeddingService:
                 log(f"Worker error: {e}", "ERROR")
                 continue
 
-    def embed(self, text: str, timeout: float = 30.0) -> np.ndarray:
+    def embed(self, text: str, task_type: str = "search_document", timeout: float = 30.0) -> np.ndarray:
         """
         Embed text (blocks until result is ready).
 
         Args:
             text: Text to embed
+            task_type: Task instruction prefix ("search_document", "search_query", "clustering", "classification")
             timeout: Maximum time to wait for response
 
         Returns:
@@ -182,7 +218,8 @@ class EmbeddingService:
         # Send request
         request = {
             'id': request_id,
-            'text': text
+            'text': text,
+            'task_type': task_type
         }
         self.request_queue.put(request)
 
