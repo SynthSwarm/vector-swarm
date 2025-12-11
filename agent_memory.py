@@ -242,6 +242,9 @@ class QdrantMemoryStore:
 
         Args:
             query_vector: Query embedding
+                         NOTE: When creating this vector, use task_type="search_query"
+                         for optimal retrieval performance with nomic-embed models.
+                         Example: query_vec = embedding_service.embed(query_text, task_type="search_query")
             limit: Max results to return
             score_threshold: Minimum similarity score
 
