@@ -5,24 +5,33 @@ Run with: python -m flask run --debug
 """
 
 import atexit
+import logging
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from swarm_manager import SwarmManager, log
 import os
 
+# Configure logging - reduce verbosity
+logging.getLogger("werkzeug").setLevel(logging.WARNING)  # Suppress HTTP request logs
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("qdrant_client").setLevel(logging.WARNING)
+
 # Initialize Flask app
 app = Flask(__name__)
+app.logger.setLevel(logging.WARNING)  # Only show warnings/errors from Flask
 CORS(app)  # Enable CORS for JS frontend
 
 # Initialize the swarm manager
 swarm = SwarmManager()
+_initialized = False  # Flag to ensure initialization happens only once
 
 
 @app.before_request
 def before_first_request():
     """Initialize swarm system before first request"""
-    # This will only run once, even with multiple requests
-    if not swarm.physics_engine:
+    global _initialized
+    if not _initialized:
+        _initialized = True
         log("🚀 Initializing Vector Swarm System...", "FLASK")
         swarm.initialize()
         log("✓ System ready for operations", "FLASK")
@@ -47,9 +56,11 @@ def start_swarm():
 
 @app.route("/api/swarm/stop", methods=["POST"])
 def stop_swarm():
-    """Stop all running agents"""
-    swarm.stop_swarm()
-    return jsonify({"status": "stopped"})
+    """Stop all running agents with optional cleanup"""
+    data = request.json or {}
+    cleanup = data.get("cleanup", False)
+    swarm.stop_swarm(cleanup=cleanup)
+    return jsonify({"status": "stopped", "cleanup": cleanup})
 
 
 @app.route("/api/swarm/state", methods=["GET"])

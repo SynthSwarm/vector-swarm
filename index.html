@@ -111,6 +111,28 @@
       transition: border 0.2s;
     }
 
+    /* Checkbox styling */
+    .checkbox-container {
+      display: flex;
+      align-items: center;
+      margin-bottom: 15px;
+      cursor: pointer;
+    }
+
+    .checkbox-container input[type="checkbox"] {
+      width: auto;
+      margin-right: 10px;
+      margin-bottom: 0;
+      cursor: pointer;
+      accent-color: var(--text-main);
+    }
+
+    .checkbox-container label {
+      margin-bottom: 0;
+      cursor: pointer;
+      color: var(--text-secondary);
+    }
+
     input[type="text"]:focus,
     input[type="number"]:focus {
       outline: none;
@@ -416,6 +438,11 @@
     <label>SWARM SIZE (Agents)</label>
     <input type="number" id="agent-count" value="5" min="1" max="20">
 
+    <div class="checkbox-container">
+      <input type="checkbox" id="cleanup-on-stop" checked>
+      <label for="cleanup-on-stop">Clean up run collections on halt</label>
+    </div>
+
     <button id="btn-start" onclick="startSwarm()">INITIALIZE SWARM</button>
     <button id="btn-stop" onclick="stopSwarm()">EMERGENCY HALT</button>
   </div>
@@ -552,10 +579,16 @@
     }
 
     async function stopSwarm() {
-      log("Sending Kill Signal...");
+      const cleanup = document.getElementById('cleanup-on-stop').checked;
+
+      log(`Sending Kill Signal... ${cleanup ? '(with cleanup)' : '(no cleanup)'}`);
       try {
-        await fetch(`${API_URL}/stop`, { method: 'POST' });
-        log("Swarm Halted.");
+        await fetch(`${API_URL}/stop`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cleanup: cleanup })
+        });
+        log(cleanup ? "Swarm Halted. Collections cleaned up." : "Swarm Halted. Collections preserved.");
         setStatus("SYSTEM OFFLINE");
         clearInterval(pollInterval);
         isPolling = false;

@@ -188,6 +188,24 @@ class SwarmManager:
 
         log("✓ Per-run collections created", "API")
 
+        # 3b. Verify collections are ready before spawning agents
+        log("Verifying collections are accessible...", "API")
+        from vector_db_config import get_current_collection_name
+        import time
+        max_retries = 10
+        for i in range(max_retries):
+            try:
+                # Try to get collection info to verify it's ready
+                self.vector_db.client.get_collection(get_current_collection_name(self.run_id))
+                log("✓ Collections verified and ready", "API")
+                break
+            except Exception as e:
+                if i < max_retries - 1:
+                    time.sleep(0.1)  # Wait 100ms before retry
+                else:
+                    log(f"⚠️ Collection verification timeout: {e}", "WARN")
+                    # Continue anyway, agents will retry
+
         # 4. Initialize memory store for this run
         self.memory_store = QdrantMemoryStore(
             run_id=self.run_id,
@@ -237,7 +255,8 @@ class SwarmManager:
                     self.run_id,
                     mission,
                     self.chat_log_queue,
-                    self.embedding_service,
+                    # Don't pass embedding_service - it contains unpicklable multiprocessing objects
+                    # Each agent will create its own embedding client
                 ),
             )
             p.start()
@@ -251,8 +270,14 @@ class SwarmManager:
             "run_id": self.run_id
         }
 
-    def stop_swarm(self):
-        """Stop all running agents and optionally cleanup collections"""
+    def stop_swarm(self, cleanup=None):
+        """
+        Stop all running agents and optionally cleanup collections.
+
+        Args:
+            cleanup: If True, delete per-run collections. If False, preserve them.
+                    If None, use QDRANT_DELETE_ON_COMPLETE config (default behavior).
+        """
         if not self.agent_processes:
             log("No active agents to stop", "API")
             return
@@ -283,13 +308,19 @@ class SwarmManager:
                 )
                 log("✓ Mission marked as completed in global collection", "API")
 
-            # Cleanup per-run collections if configured
-            if QDRANT_DELETE_ON_COMPLETE and self.memory_store:
+            # Determine if cleanup should happen
+            # Priority: explicit cleanup parameter > config default
+            should_cleanup = cleanup if cleanup is not None else QDRANT_DELETE_ON_COMPLETE
+
+            # Cleanup per-run collections if requested
+            if should_cleanup and self.memory_store:
                 log("Cleaning up per-run collections...", "API")
                 if self.memory_store.cleanup():
                     log("✓ Per-run collections deleted", "API")
                 else:
                     log("⚠️  Some collections failed to delete", "WARN")
+            elif self.memory_store:
+                log("Per-run collections preserved for inspection", "API")
 
         # Reset state for next run
         self.pca_fitted = False
@@ -421,7 +452,7 @@ class SwarmManager:
 
 
 # --- Agent Process Entry Point (Must be top-level for pickling) ---
-def _run_agent_process(agent_id, run_id, mission, log_queue, embedding_service):
+def _run_agent_process(agent_id, run_id, mission, log_queue):
     """
     The entry point for a child process.
     Attaches to Qdrant collections for the given run_id.
@@ -431,33 +462,36 @@ def _run_agent_process(agent_id, run_id, mission, log_queue, embedding_service):
         run_id: UUID for this swarm run
         mission: The mission/task for this agent
         log_queue: multiprocessing.Queue for chat logs
-        embedding_service: Shared embedding service instance
     """
     log(f"Agent {agent_id} starting up (run_id: {run_id})", "AGENT")
 
-    # 1. Initialize Vector DB Service
+    # 1. Initialize embedding service for this agent
+    # Each agent gets its own embedding service client
+    agent_embedding_service = create_embedding_service(
+        backend_type="fastembed",
+        model_name=EMBED_MODEL
+    )
+
+    # 2. Initialize Vector DB Service
     vector_db = VectorDBService(use_grpc=True)
 
-    # 2. Create Memory Store (attach to existing run collections)
+    # 3. Create Memory Store (attach to existing run collections)
     memory_store = QdrantMemoryStore(
         run_id=run_id,
         vector_db_service=vector_db,
         vector_dim=VECTOR_DIM
     )
 
-    # 3. Initialize Physics Engine
+    # 4. Initialize Physics Engine
     physics = SwarmPhysics(memory_store=memory_store, vector_dim=VECTOR_DIM)
 
-    # 4. Setup Local LLM Client with Logging Wrapper
+    # 5. Setup Local LLM Client with Logging Wrapper
     base_client = OpenAI(base_url=VLLM_API, api_key="dummy")
     logged_client = LoggedLLMClient(base_client, agent_id, log_queue)
 
-    # 5. Helper function to get embeddings
+    # 6. Helper function to get embeddings
     def get_embedding(text):
-        if embedding_service is None:
-            log("Embedding service not initialized!", "ERROR")
-            return np.zeros(VECTOR_DIM, dtype=np.float32)
-        return embedding_service.embed(text)
+        return agent_embedding_service.embed(text)
 
     # 6. Create Agent Instance
     agent = VectorAgent(
@@ -481,5 +515,6 @@ def _run_agent_process(agent_id, run_id, mission, log_queue, embedding_service):
         log(f"Agent {agent_id} shutting down", "AGENT")
     finally:
         # Cleanup
+        agent_embedding_service.shutdown()
         physics.cleanup()
         vector_db.close()
